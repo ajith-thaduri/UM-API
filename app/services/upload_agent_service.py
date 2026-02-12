@@ -15,7 +15,7 @@ from app.core.config import settings
 from app.services.pdf_analyzer_service import PatientInfo, AnalysisResult, pdf_analyzer_service
 from app.models.upload_session import UploadSession as UploadSessionModel
 from app.repositories.upload_session_repository import UploadSessionRepository
-from app.services.llm.llm_factory import get_llm_service_instance
+from app.services.llm.llm_factory import get_tier1_llm_service
 from app.services.llm_utils import extract_json_from_response
 from app.services.prompts import upload_prompts
 
@@ -98,7 +98,7 @@ class UploadAgentService:
         self.repository = UploadSessionRepository()
     
     def _get_llm(self):
-        return get_llm_service_instance()
+        return get_tier1_llm_service()
     
     def start_session(self, db: Session, user_id: Optional[str] = None) -> tuple[str, AgentMessage]:
         """Start a new upload session and return greeting"""

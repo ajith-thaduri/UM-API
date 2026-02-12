@@ -1329,8 +1329,7 @@ class TimelineService:
         # Import here to avoid circular imports
         from app.services.rag_retriever import rag_retriever
         from app.services.embedding_service import embedding_service
-        from app.services.llm.llm_factory import get_llm_service_instance
-        from app.core.config import settings
+        from app.services.llm.llm_factory import get_tier1_llm_service, get_tier1_llm_service_for_user
         from app.core.config import settings
         
         additional_events = []
@@ -1355,12 +1354,11 @@ class TimelineService:
         
         context = "\n\n".join(context_parts)
         
-        # Use LLM to extract additional temporal events
-        from app.services.llm.llm_factory import get_llm_service_for_user
+        # Use Tier 1 LLM to extract additional temporal events (PHI allowed)
         if db and user_id:
-            llm_service = get_llm_service_for_user(db, user_id)
+            llm_service = get_tier1_llm_service_for_user(db, user_id)
         else:
-            llm_service = get_llm_service_instance()
+            llm_service = get_tier1_llm_service()
         
         if not llm_service.is_available():
             return []

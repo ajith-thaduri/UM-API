@@ -6,7 +6,7 @@ import uuid
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.services.llm.llm_factory import get_llm_service_instance
+from app.services.llm.llm_factory import get_tier1_llm_service, get_tier1_llm_service_for_user
 from app.services.prompt_service import prompt_service
 
 logger = logging.getLogger(__name__)
@@ -25,11 +25,10 @@ class MissingInfoService:
         pass
     
     def _get_llm_service(self, db: Optional[Session] = None, user_id: Optional[str] = None):
-        """Get LLM service instance (fresh each time to respect config changes)"""
+        """Tier 1: OSS/OpenRouter for red flags (PHI allowed)."""
         if db and user_id:
-            from app.services.llm.llm_factory import get_llm_service_for_user
-            return get_llm_service_for_user(db, user_id)
-        return get_llm_service_instance()
+            return get_tier1_llm_service_for_user(db, user_id)
+        return get_tier1_llm_service()
 
     async def detect(
         self,

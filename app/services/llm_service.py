@@ -4,7 +4,7 @@ import json
 from typing import Dict, List, Optional
 import logging
 from app.core.config import settings
-from app.services.llm.llm_factory import get_llm_service_instance
+from app.services.llm.llm_factory import get_tier1_llm_service
 from app.services.prompt_service import prompt_service
 
 logger = logging.getLogger(__name__)
@@ -18,8 +18,8 @@ class LLMService:
         pass
     
     def _get_llm_service(self):
-        """Get LLM service instance (fresh each time to respect config changes)"""
-        return get_llm_service_instance()
+        """Tier 1: OSS/OpenRouter for extraction (PHI allowed)."""
+        return get_tier1_llm_service()
 
     async def extract_clinical_information(
         self, 

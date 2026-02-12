@@ -18,6 +18,7 @@ from app.api.endpoints import (
     analytics,
     prompts,
     oauth,
+    presidio_tools,
 )
 
 api_router = APIRouter()
@@ -38,4 +39,5 @@ api_router.include_router(usage.router, prefix="", tags=["usage"])
 api_router.include_router(wallet.router, prefix="", tags=["wallet"])
 api_router.include_router(analytics.router, prefix="", tags=["analytics"])
 api_router.include_router(prompts.router, prefix="", tags=["prompts"])
+api_router.include_router(presidio_tools.router, prefix="/presidio", tags=["presidio"])
 

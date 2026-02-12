@@ -173,6 +173,52 @@ class Settings(BaseSettings):
     # Generate with: openssl rand -hex 32
     OAUTH_TOKEN_ENCRYPTION_KEY: str = ""
 
+    # Two-tier HIPAA architecture
+    # Tier 1: OSS LLM (OpenRouter or self-hosted) — timeline, clinical extraction, contradictions, upload agent (PHI allowed)
+    # Tier 2: Claude only — summary generation (no PHI; dates shifted per case)
+    TIER1_LLM_PROVIDER: str = ""  # "openrouter" to use OpenRouter for Tier 1
+    OPENROUTER_API_KEY: str = ""
+    OPENROUTER_MODEL: str = "meta-llama/llama-3.1-70b-instruct"  # or e.g. "anthropic/claude-3-haiku" for testing
+    OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
+    OPENROUTER_TEMPERATURE: float = 0.1
+    OPENROUTER_MAX_TOKENS: int = 12000
+    
+    # Tier 2 summary: always Claude; payload is de-identified and date-shifted before send
+    TIER2_SUMMARY_PROVIDER: str = "claude"  # Always Claude
+    TIER2_SUMMARY_DEIDENTIFY: bool = True  # Apply date shift and PHI strip before sending to Claude
+    
+    # Presidio De-Identification Configuration
+    PRESIDIO_LANGUAGE: str = "en"
+    PRESIDIO_NER_ENGINE: str = "spacy"  # "spacy" or "transformers"
+    PRESIDIO_NER_MODEL: str = "en_core_web_lg"  # spaCy model (used when engine=spacy)
+    PRESIDIO_TRANSFORMER_MODEL: str = "obi/deid_roberta_i2b2"  # HuggingFace model (used when engine=transformers)
+    PRESIDIO_ENTITIES: List[str] = [
+        "PERSON",
+        "PHONE_NUMBER",
+        "US_SSN",
+        "EMAIL_ADDRESS",
+        "LOCATION",
+        "ORGANIZATION",
+    ]
+    PRESIDIO_FREE_TEXT_THRESHOLD: float = 0.7  # Aggressive for free-text scanning
+    PRESIDIO_PREFLIGHT_THRESHOLD: float = 0.9  # Ultra-sensitive for pre-flight validation
+    
+    # Token Format (UUID12 = 48 bits, ~281 trillion combinations)
+    # This minimizes collision risk even at multi-million entity scale
+    TOKEN_UUID_LENGTH: int = 12  # Characters from UUID (8=32bit, 12=48bit, 16=64bit)
+    
+    # Date Shifting
+    DATE_SHIFT_MIN_DAYS: int = 0
+    DATE_SHIFT_MAX_DAYS: int = 30
+    
+    # Privacy Vault (stores token maps and date shift offsets)
+    PRIVACY_VAULT_RETENTION_DAYS: int = 90  # Vault entries auto-expire after this period
+    
+    # Safety Controls
+    ENABLE_PREFLIGHT_VALIDATION: bool = True  # Fail-closed: block if PHI detected before Tier 2
+    TREAT_CASE_NUMBER_AS_PHI: bool = True  # Default: tokenize case numbers (can override for internal IDs)
+    ENABLE_TWO_TIER_ARCHITECTURE: bool = True  # Feature flag for gradual rollout
+
 
 settings = Settings()
 

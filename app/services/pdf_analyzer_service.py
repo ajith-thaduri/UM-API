@@ -2,11 +2,12 @@
 
 import re
 import json
+import asyncio
 import logging
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from app.services.llm.llm_factory import get_llm_service_instance
+from app.services.llm.llm_factory import get_tier1_llm_service
 from app.services.llm_utils import extract_json_from_response
 
 from app.core.config import settings
@@ -158,8 +159,8 @@ class PDFAnalyzerService:
         pass
     
     def _get_llm_service(self):
-        """Get LLM service instance (fresh each time to respect config changes)"""
-        return get_llm_service_instance()
+        """Tier 1: OSS/OpenRouter for upload analysis (PHI allowed)."""
+        return get_tier1_llm_service()
     
     async def analyze_for_upload(self, file_paths: List[str]) -> AnalysisResult:
         """
@@ -208,20 +209,37 @@ class PDFAnalyzerService:
             # This ensures we can identify which specific file is non-medical
             non_medical_file_texts = []  # Track which files are non-medical for exclusion
             if settings.ENABLE_MEDICAL_GUARDRAIL:
-                # Analyze each file individually with LLM for per-file relevance check
+                # Analyze each file individually with LLM for per-file relevance check (PARALLEL)
+                tasks = []
+                task_indices = []
+                
                 for i, file_analysis in enumerate(files_analysis):
                     if file_analysis.detected_type.startswith("non_medical_"):
                         # Already flagged by keywords, skip LLM check for this file
                         non_medical_file_texts.append(file_analysis.file_name)
                         continue
                     
-                    # Check this file individually with LLM
                     file_text = file_analysis.extraction_preview[:8000]  # Limit for LLM
                     if file_text and len(file_text) > 50:  # Only if we have meaningful text
-                        try:
-                            file_llm_info = await self._extract_patient_info_llm(file_text)
-                            if file_llm_info and not file_llm_info.is_medical:
-                                # Update the file analysis to reflect non-medical status
+                        tasks.append(self._extract_patient_info_llm(file_text))
+                        task_indices.append(i)
+                
+                if tasks:
+                    logger.info(f"Running guardrail checks for {len(tasks)} files in parallel...")
+                    # Run all LLM calls concurrently
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+                    
+                    for i, result in zip(task_indices, results):
+                        file_analysis = files_analysis[i]
+                        
+                        if isinstance(result, Exception):
+                            logger.warning(f"LLM guardrail check failed for {file_analysis.file_name}: {result}")
+                            continue
+                        
+                        file_llm_info = result
+                        if file_llm_info and not file_llm_info.is_medical:
+                            # Update the file analysis to reflect non-medical status
+                            try:
                                 files_analysis[i] = FileAnalysis(
                                     file_name=file_analysis.file_name,
                                     file_path=file_analysis.file_path,
@@ -232,9 +250,8 @@ class PDFAnalyzerService:
                                     confidence=0.95  # High confidence from LLM
                                 )
                                 non_medical_file_texts.append(file_analysis.file_name)
-                        except Exception as e:
-                            logger.warning(f"LLM guardrail check failed for {file_analysis.file_name}: {e}")
-                            # Continue with keyword-based detection only
+                            except Exception as e:
+                                logger.error(f"Error updating file analysis for {file_analysis.file_name}: {e}")
             
             # Build combined text from ONLY medical files for patient info extraction
             medical_combined_text = ""

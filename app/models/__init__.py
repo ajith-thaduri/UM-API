@@ -26,6 +26,8 @@ from app.models.transaction import Transaction
 from app.models.prompt import Prompt
 from app.models.version_history import VersionHistory, VersionEventType
 from app.models.token_blacklist import TokenBlacklist
+from app.models.case_date_shift import CaseDateShift
+from app.models.privacy_vault import PrivacyVault
 
 __all__ = [
     "Base",
@@ -57,5 +59,6 @@ __all__ = [
     "Prompt",
     "VersionHistory",
     "VersionEventType",
+    "CaseDateShift",
 ]
 

@@ -55,6 +55,45 @@ def get_llm_service(provider: Optional[str] = None, model: Optional[str] = None)
         )
 
 
+def get_tier2_llm_service() -> BaseLLMService:
+    """
+    Tier 2 (summary only): always Claude. No PHI is sent; use with de-identified + date-shifted payloads only.
+    """
+    return ClaudeService()
+
+
+def get_tier1_llm_service(provider: Optional[str] = None, model: Optional[str] = None) -> BaseLLMService:
+    """
+    Tier 1 (timeline, clinical extraction, contradictions, red flags, upload agent): OSS/OpenRouter.
+    PHI is allowed; use for in-VPC or OpenRouter OSS models.
+    """
+    tier1_provider = (provider or getattr(settings, "TIER1_LLM_PROVIDER", None) or "").strip().lower()
+    if tier1_provider == "openrouter":
+        try:
+            from app.services.llm.openrouter_service import OpenRouterService
+            return OpenRouterService()
+        except Exception as e:
+            logger.warning("OpenRouter not available for Tier 1: %s. Falling back to config.", e)
+    return get_llm_service(provider, model)
+
+
+def get_tier1_llm_service_for_user(
+    db: Session,
+    user_id: str,
+    provider: Optional[str] = None,
+    model: Optional[str] = None
+) -> BaseLLMService:
+    """Tier 1 LLM respecting user preferences when not using OpenRouter."""
+    t1 = (provider or getattr(settings, "TIER1_LLM_PROVIDER", None) or "").strip().lower()
+    if t1 == "openrouter":
+        try:
+            from app.services.llm.openrouter_service import OpenRouterService
+            return OpenRouterService()
+        except Exception as e:
+            logger.warning("OpenRouter not available: %s. Falling back to user preference.", e)
+    return get_llm_service_for_user(db, user_id, provider, model)
+
+
 def get_llm_service_for_user(
     db: Session,
     user_id: str,

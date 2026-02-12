@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from sqlalchemy.orm import Session
 from app.core.config import settings
-from app.services.llm.llm_factory import get_llm_service_instance
+from app.services.llm.llm_factory import get_tier1_llm_service_for_user, get_tier1_llm_service
 from app.models.document_chunk import SectionType
 from app.models.dashboard import FacetType
 from app.services.rag_retriever import rag_retriever, RAGContext
@@ -55,11 +55,10 @@ class MainAgent:
         self._max_history = MAX_HISTORY_MESSAGES
     
     def _get_llm_service(self, db: Optional[Session] = None, user_id: Optional[str] = None):
-        """Get LLM service instance (fresh each time to respect config changes)"""
+        """Tier 1: OSS/OpenRouter for follow-up (PHI allowed)."""
         if db and user_id:
-            from app.services.llm.llm_factory import get_llm_service_for_user
-            return get_llm_service_for_user(db, user_id)
-        return get_llm_service_instance()
+            return get_tier1_llm_service_for_user(db, user_id)
+        return get_tier1_llm_service()
 
     async def answer_follow_up_question(
         self,

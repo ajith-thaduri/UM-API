@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.services.llm.llm_factory import get_llm_service_instance
+from app.services.llm.llm_factory import get_tier1_llm_service, get_tier1_llm_service_for_user
 from app.models.document_chunk import SectionType
 from app.services.rag_retriever import rag_retriever, RAGContext
 from app.services.embedding_service import embedding_service
@@ -40,11 +40,10 @@ class ClinicalAgent:
         pass
     
     def _get_llm_service(self, db: Optional[Session] = None, user_id: Optional[str] = None):
-        """Get LLM service instance (fresh each time to respect config changes)"""
+        """Tier 1: OSS/OpenRouter for extraction (PHI allowed)."""
         if db and user_id:
-            from app.services.llm.llm_factory import get_llm_service_for_user
-            return get_llm_service_for_user(db, user_id)
-        return get_llm_service_instance()
+            return get_tier1_llm_service_for_user(db, user_id)
+        return get_tier1_llm_service()
 
     async def _extract_generic(
         self,
