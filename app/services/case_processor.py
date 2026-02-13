@@ -25,6 +25,8 @@ from app.services.embedding_service import embedding_service
 from app.services.pgvector_service import pgvector_service  # Added
 from app.services.clinical_agent import clinical_agent
 from app.services.pdf_analyzer_service import pdf_analyzer_service
+from app.services.page_service import page_service  # Added for Page-Indexed RAG
+from app.services.entity_extraction_service import entity_extraction_service  # Added for Phase 3
 from app.repositories.chunk_repository import chunk_repository
 from app.db.session import SessionLocal
 from app.core.config import settings
@@ -290,6 +292,19 @@ class CaseProcessor:
                         if pdf_result is None:
                             failed_files.append(file_info['file_name'])
                             continue
+
+                        # NEW: Create normalized pages for Page-Indexed RAG
+                        try:
+                            page_service.create_pages_from_pdf(
+                                db,
+                                case_id,
+                                file_info['id'], 
+                                user_id,
+                                pdf_result
+                            )
+                        except Exception as e:
+                            logger.error(f"Failed to create normalized pages for file {file_info['file_name']}: {e}")
+                            # Continue processing even if page creation fails (for now)
                     
                         # Store file/page mapping with text and bbox data
                         file_page_mapping[file_info['id']] = {}
@@ -308,6 +323,14 @@ class CaseProcessor:
                         
                         all_extracted_text.append(pdf_result["text"])
                         successful_extractions += 1
+                
+                # NEW: Generate page embeddings for RAG
+                if successful_extractions > 0:
+                    try:
+                        embed_count = page_service.generate_page_embeddings(db, case_id, user_id)
+                        logger.info(f"Generated {embed_count} page embeddings for case {case_id}")
+                    except Exception as e:
+                        logger.error(f"Failed to generate page embeddings: {e}")
                 
                 # Require at least one successful extraction
                 if successful_extractions == 0:
@@ -435,8 +458,23 @@ class CaseProcessor:
                             logger.warning(f"[TIMING] Entity source creation skipped: table not found. Run migration: alembic upgrade head")
                         else:
                             logger.warning(f"[TIMING] Entity source creation failed: {error_msg}")
-                            # Re-raise so case processing fails and caller can mark case as failed (avoids commit on broken session)
-                            raise
+
+                    # NEW Phase 3: Create grounded Entities with temporal links (Page-Indexed RAG)
+                    try:
+                        grounding_start = time.time()
+                        await entity_extraction_service.process_extraction_results(
+                            db,
+                            case_id,
+                            user_id,
+                            clinical_data,
+                            extraction_sources
+                        )
+                        grounding_time = time.time() - grounding_start
+                        logger.info(f"[TIMING] Entity grounding completed in {grounding_time:.2f}s for case {case_id}")
+                    except Exception as e:
+                        logger.error(f"Failed to create grounded entities: {e}")
+                        # Re-raise so case processing fails and caller can mark case as failed (avoids commit on broken session)
+                        raise
                 else:
                     # Fallback to direct LLM extraction (async)
                     logger.info(f"[TIMING] Starting direct LLM extraction for case {case_id}")

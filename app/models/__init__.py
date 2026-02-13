@@ -27,6 +27,12 @@ from app.models.prompt import Prompt
 from app.models.version_history import VersionHistory, VersionEventType
 from app.models.token_blacklist import TokenBlacklist
 
+# Page-indexed RAG models
+from app.models.normalized_page import NormalizedPage
+from app.models.page_vector import PageVector
+from app.models.page_temporal_profile import PageTemporalProfile
+from app.models.entity import Entity  # New Entity model
+
 __all__ = [
     "Base",
     "Case",
@@ -57,5 +63,10 @@ __all__ = [
     "Prompt",
     "VersionHistory",
     "VersionEventType",
+    # Page-indexed RAG models
+    "NormalizedPage",
+    "PageVector",
+    "PageTemporalProfile",
+    "Entity",
 ]
 

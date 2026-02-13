@@ -41,6 +41,7 @@ class EntitySourceService:
         bbox: Optional[Dict[str, float]] = None,
         snippet: Optional[str] = None,
         full_text: Optional[str] = None,
+        page_id: Optional[str] = None,
     ) -> EntitySource:
         """
         Create an entity source record.
@@ -48,6 +49,8 @@ class EntitySourceService:
         If chunk_id is provided, it will be used to get accurate location data.
         Otherwise, file_id and page_number must be provided.
         """
+        from app.models.normalized_page import NormalizedPage
+        
         # If chunk_id is provided, get location data from chunk
         if chunk_id:
             chunk = self.chunk_repo.get_by_id(db, chunk_id)
@@ -56,9 +59,14 @@ class EntitySourceService:
                 page_number = page_number or chunk.page_number
                 bbox = bbox or chunk.bbox
                 snippet = snippet or chunk.chunk_text[:500] if chunk.chunk_text else None
+                page_id = page_id or chunk.page_id
                 logger.debug(f"Resolved location from chunk {chunk_id}: file_id={file_id}, page={page_number}")
             else:
                 logger.warning(f"Chunk {chunk_id} not found, using provided file_id/page_number")
+        
+        # Derive page_id if missing
+        if not page_id and file_id and page_number is not None:
+            page_id = NormalizedPage.generate_page_id(case_id, file_id, page_number)
         
         # Validate required fields
         if not file_id or page_number is None:
@@ -75,6 +83,7 @@ class EntitySourceService:
                 existing.chunk_id = chunk_id or existing.chunk_id
                 existing.file_id = file_id
                 existing.page_number = page_number
+                existing.page_id = page_id or existing.page_id
                 existing.bbox = bbox or existing.bbox
                 existing.snippet = snippet or existing.snippet
                 existing.full_text = full_text or existing.full_text
@@ -98,6 +107,7 @@ class EntitySourceService:
             entity_id=entity_id,
             chunk_id=chunk_id,
             file_id=file_id,
+            page_id=page_id,
             page_number=page_number,
             bbox=bbox,
             snippet=snippet,
@@ -199,6 +209,7 @@ class EntitySourceService:
                     "entity_id": entity_id,
                     "chunk_id": chunk_id,
                     "file_id": data.get("file_id"),
+                    "page_id": data.get("page_id"),
                     "page_number": data.get("page_number"),
                     "bbox": data.get("bbox"),
                     "snippet": data.get("snippet"),
@@ -304,15 +315,16 @@ class EntitySourceService:
             file_id = source.get("file_id") or (item.get("source_file") if isinstance(item, dict) else None)
             page_number = source.get("page_number") or (item.get("source_page") if isinstance(item, dict) else None)
             
-            # Require valid location data
-            if not (chunk_id or (file_id and page_number)):
-                return None
-                
+            # Derived fields
+            from app.models.normalized_page import NormalizedPage
+            page_id = source.get("page_id") or NormalizedPage.generate_page_id(case_id, file_id, page_number)
+            
             return {
                 "entity_type": entity_type,
                 "entity_id": entity_id,
                 "chunk_id": chunk_id,
                 "file_id": file_id,
+                "page_id": page_id,
                 "page_number": page_number,
                 "bbox": source.get("bbox"),
                 "snippet": item.get("name", "")[:200] if isinstance(item, dict) else str(item)[:200]

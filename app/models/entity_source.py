@@ -3,7 +3,7 @@
 from datetime import datetime
 from sqlalchemy import Column, String, Integer, DateTime, ForeignKey, Text
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, foreign
 
 from app.db.session import Base
 
@@ -25,11 +25,12 @@ class EntitySource(Base):
     
     # Entity identification
     entity_type = Column(String(50), nullable=False, index=True)  # 'medication', 'lab', 'timeline', 'diagnosis', etc.
-    entity_id = Column(String(255), nullable=False)  # 'medication:0', 'timeline:abc123', 'lab:5', etc.
+    entity_id = Column(String(255), nullable=False, index=True)  # 'medication:0', 'timeline:abc123', 'lab:5', etc. (No FK to entities to allow timeline grounding)
     
     # Source location (from document chunk)
     chunk_id = Column(String, ForeignKey("document_chunks.id", ondelete="SET NULL"), nullable=True, index=True)
     file_id = Column(String, ForeignKey("case_files.id", ondelete="SET NULL"), nullable=True, index=True)
+    page_id = Column(String, ForeignKey("normalized_pages.page_id", ondelete="CASCADE"), nullable=True, index=True)
     page_number = Column(Integer, nullable=False)  # Validated page number
     
     # Highlighting data
@@ -44,7 +45,8 @@ class EntitySource(Base):
     # Relationships
     chunk = relationship("DocumentChunk", foreign_keys=[chunk_id])
     file = relationship("CaseFile", foreign_keys=[file_id])
+    page = relationship("NormalizedPage", foreign_keys=[page_id])
+    entity = relationship("Entity", primaryjoin="foreign(EntitySource.entity_id) == Entity.entity_id", back_populates="sources", overlaps="sources")
     
     def __repr__(self):
         return f"<EntitySource {self.entity_type}:{self.entity_id} -> {self.file_id}:{self.page_number}>"
-

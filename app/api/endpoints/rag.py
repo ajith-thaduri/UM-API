@@ -11,6 +11,7 @@ from app.models.dashboard import FacetType
 from app.services.main_agent import main_agent
 from app.services.source_link_service import build_source_link_service
 from app.services.rag_retriever import rag_retriever
+from app.services.rag_orchestrator import rag_orchestrator  # Added for Phase 4
 from app.repositories.chunk_repository import chunk_repository
 from app.api.endpoints.auth import get_current_user
 from app.models.user import User
@@ -169,6 +170,74 @@ async def query_dashboard(
                 detail="The AI service is temporarily overloaded. Please try again in a moment.",
             )
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/dashboard/{case_id}/rag_query", response_model=QueryResponse)
+async def query_rag_v2(
+    case_id: str,
+    request: QueryRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    [Phase 4] Intelligent RAG Query Endpoint
+    
+    Uses RAG Orchestrator to route between Key-Value/Entity lookup and
+    Semantic Page Search based on query intent.
+    """
+    # Verify case
+    from app.db.dependencies import get_case_repository
+    case_repo = get_case_repository()
+    case = case_repo.get_by_id(db, case_id, user_id=current_user.id)
+    if not case:
+        raise HTTPException(status_code=404, detail="Case not found")
+        
+    try:
+        # Use new Orchestrator
+        result = await rag_orchestrator.answer_query(
+            db=db,
+            query=request.question,
+            case_id=case_id,
+            user_id=current_user.id,
+            # We could fetch chat history here if needed
+            chat_history=[]
+        )
+        
+        # Map result to QueryResponse
+        sources = []
+        chunks_used = []
+        
+        for s in result.get("sources", []):
+            # Adapt source format
+            # New sources might be entity refs or page refs
+            if "chunk_id" in s:
+                chunks_used.append(s["chunk_id"])
+                
+            sources.append(SourceReference(
+                chunk_id=s.get("chunk_id", ""),
+                vector_id=s.get("vector_id", ""),
+                file_id=s.get("file_id", ""),
+                page_number=s.get("page_number", 0),
+                section_type=s.get("type", "page"), # Map type to section_type
+                score=1.0, 
+                text_preview=s.get("snippet") or s.get("value")
+            ))
+            
+        return QueryResponse(
+            answer=result["answer"],
+            sources=sources,
+            chunks_used=chunks_used,
+            confidence=0.9, # Placeholder
+            suggested_actions=[f"Strategy: {result.get('strategy')}"]
+        )
+        
+    except Exception as e:
+        # Fallback to old agent if new one fails?
+        # For now, just raise
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Page-Indexed RAG failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"RAG Error: {str(e)}")
 
 
 @router.get("/dashboard/{case_id}/conversation", response_model=ConversationHistoryResponse)

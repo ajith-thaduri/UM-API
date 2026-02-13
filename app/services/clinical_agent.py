@@ -469,6 +469,7 @@ class ClinicalAgent:
                 "vector_id": ref["vector_id"],
                 "file_id": ref["file_id"],
                 "page_number": ref["page_number"],
+                "page_id": ref.get("page_id"),
                 "section_type": ref["section_type"],
                 "score": ref["score"]
             })

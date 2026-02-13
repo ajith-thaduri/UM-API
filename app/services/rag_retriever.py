@@ -1,6 +1,7 @@
 """RAG retriever service for semantic search and context building"""
 
 import logging
+import math
 from typing import List, Dict, Optional, Any
 from dataclasses import dataclass
 from sqlalchemy.orm import Session
@@ -47,6 +48,7 @@ class RetrievedChunk:
     char_start: int
     char_end: int
     token_count: int
+    page_id: Optional[str] = None
     bbox: Optional[List[Dict]] = None
 
 
@@ -117,10 +119,11 @@ class RAGRetriever:
                 page_number=chunk.page_number,
                 section_type=chunk.section_type,
                 chunk_text=chunk.chunk_text,
-                score=score_lookup.get(chunk.vector_id, 0.0),
+                score=score_lookup.get(chunk.vector_id, 0.0) if not math.isnan(score_lookup.get(chunk.vector_id, 0.0)) else 0.0,
                 char_start=chunk.char_start,
                 char_end=chunk.char_end,
                 token_count=chunk.token_count,
+                page_id=chunk.page_id,
                 bbox=chunk.bbox
             ))
         
@@ -168,11 +171,25 @@ class RAGRetriever:
             # Combine original scores with rerank scores (weighted average)
             # Weight: 0.3 original FAISS score, 0.7 rerank score
             for i, chunk in enumerate(chunks):
-                rerank_score = float(rerank_scores[i])
-                # Normalize rerank score to 0-1 range (sigmoid-like)
-                normalized_rerank = 1 / (1 + abs(rerank_score)) if rerank_score < 0 else rerank_score / (1 + rerank_score)
-                # Weighted combination
-                chunk.score = 0.3 * chunk.score + 0.7 * normalized_rerank
+                try:
+                    rerank_score = float(rerank_scores[i])
+                    # Normalize rerank score to 0-1 range (sigmoid-like)
+                    if math.isnan(rerank_score) or math.isinf(rerank_score):
+                        normalized_rerank = 0.0
+                    else:
+                        normalized_rerank = 1 / (1 + abs(rerank_score)) if rerank_score < 0 else rerank_score / (1 + rerank_score)
+                    
+                    # Weighted combination
+                    combined_score = 0.3 * chunk.score + 0.7 * normalized_rerank
+                    
+                    # Ensure score is JSON-safe (no NaN)
+                    if math.isnan(combined_score) or math.isinf(combined_score):
+                        chunk.score = 0.0
+                    else:
+                        chunk.score = combined_score
+                except Exception as e:
+                    logger.warning(f"Error calculating score for chunk {i}: {e}")
+                    chunk.score = 0.0
             
             # Sort by combined score
             chunks.sort(key=lambda x: x.score, reverse=True)
@@ -223,6 +240,7 @@ class RAGRetriever:
                     char_start=chunk.char_start,
                     char_end=chunk.char_end,
                     token_count=chunk.token_count,
+                    page_id=chunk.page_id,
                     bbox=chunk.bbox
                 )
                 for chunk in db_chunks
@@ -258,6 +276,7 @@ class RAGRetriever:
                 char_start=chunk.char_start,
                 char_end=chunk.char_end,
                 token_count=chunk.token_count,
+                page_id=chunk.page_id,
                 bbox=chunk.bbox
             )
             for chunk in db_chunks
@@ -351,6 +370,7 @@ class RAGRetriever:
                         "score": chunk.score,
                         "char_start": chunk.char_start,
                         "char_end": chunk.char_end,
+                        "page_id": chunk.page_id,
                         "bbox": chunk.bbox
                     })
                     
@@ -386,6 +406,7 @@ class RAGRetriever:
                     "score": chunk.score,
                     "char_start": chunk.char_start,
                     "char_end": chunk.char_end,
+                    "page_id": chunk.page_id,
                     "bbox": chunk.bbox
                 })
         else:
@@ -415,6 +436,7 @@ class RAGRetriever:
                     "score": chunk.score,
                     "char_start": chunk.char_start,
                     "char_end": chunk.char_end,
+                    "page_id": chunk.page_id,
                     "bbox": chunk.bbox
                 })
         
@@ -506,7 +528,8 @@ class RAGRetriever:
             score=1.0,
             char_start=chunk.char_start,
             char_end=chunk.char_end,
-            token_count=chunk.token_count
+            token_count=chunk.token_count,
+            page_id=chunk.page_id
         )
 
     def get_chunk_by_vector_id(
@@ -540,7 +563,8 @@ class RAGRetriever:
             score=1.0,
             char_start=chunk.char_start,
             char_end=chunk.char_end,
-            token_count=chunk.token_count
+            token_count=chunk.token_count,
+            page_id=chunk.page_id
         )
 
 

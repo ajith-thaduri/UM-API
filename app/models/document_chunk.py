@@ -35,6 +35,11 @@ class DocumentChunk(Base):
     file_id = Column(String, ForeignKey("case_files.id"), nullable=False, index=True)
     user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     
+    # NEW: Explicit parent page relationship
+    # nullable=True for backward compatibility during migration
+    page_id = Column(String, ForeignKey("normalized_pages.page_id", ondelete="CASCADE"), 
+                     nullable=True, index=True)
+    
     # Chunk positioning
     chunk_index = Column(Integer, nullable=False)
     page_number = Column(Integer, nullable=False)
@@ -83,6 +88,7 @@ class DocumentChunk(Base):
     # Relationships
     case = relationship("Case", backref="chunks")
     file = relationship("CaseFile", backref="chunks")
+    page = relationship("NormalizedPage", back_populates="chunks", foreign_keys=[page_id])
 
     def __repr__(self):
         return f"<DocumentChunk {self.id} (Case: {self.case_id}, Page: {self.page_number}, Section: {self.section_type})>"
