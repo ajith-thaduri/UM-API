@@ -39,6 +39,115 @@ class ClinicalAgent:
         # Don't cache - get fresh service each time to respect config changes
         pass
     
+    def _scan_for_critical_fields(
+        self,
+        db: Session,
+        case_id: str,
+        extracted_data: Dict
+    ) -> Dict:
+        """
+        Scan ALL chunks for critical fields that are commonly missed by RAG
+        
+        Critical fields:
+        - Admission date
+        - Discharge date  
+        - Primary diagnosis
+        - Length of stay
+        
+        This bypasses RAG semantic search and uses pattern matching to ensure
+        critical information is not missed due to embedding/query mismatches.
+        
+        Args:
+            db: Database session
+            case_id: Case ID
+            extracted_data: Current extracted data dict
+            
+        Returns:
+            Updated extracted_data with critical fields filled in if found
+        """
+        import re
+        from app.repositories.chunk_repository import chunk_repository
+        
+        # Get ALL chunks for case (bypass RAG)
+        all_chunks = chunk_repository.get_by_case_id(db, case_id)
+        
+        # Scan for admission date if missing
+        if not extracted_data.get('admission_date'):
+            admission_patterns = [
+                r'admitted\s+on\s+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})',
+                r'admission\s+date[:\s]+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})',
+                r'date\s+of\s+admission[:\s]+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})',
+                r'patient\s+admitted[:\s]+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})',
+            ]
+            for chunk in all_chunks:
+                for pattern in admission_patterns:
+                    match = re.search(pattern, chunk.chunk_text, re.IGNORECASE)
+                    if match:
+                        extracted_data['admission_date'] = match.group(1)
+                        extracted_data['admission_date_source'] = {
+                            'file_id': chunk.file_id,
+                            'page_number': chunk.page_number,
+                            'chunk_id': chunk.id,
+                            'from_critical_scan': True
+                        }
+                        logger.info(f"[CRITICAL_SCAN] Found admission date via full scan: {match.group(1)}")
+                        break
+                if extracted_data.get('admission_date'):
+                    break
+        
+        # Scan for discharge date if missing
+        if not extracted_data.get('discharge_date'):
+            discharge_patterns = [
+                r'discharged\s+on\s+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})',
+                r'discharge\s+date[:\s]+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})',
+                r'date\s+of\s+discharge[:\s]+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})',
+                r'patient\s+discharged[:\s]+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})',
+            ]
+            for chunk in all_chunks:
+                for pattern in discharge_patterns:
+                    match = re.search(pattern, chunk.chunk_text, re.IGNORECASE)
+                    if match:
+                        extracted_data['discharge_date'] = match.group(1)
+                        extracted_data['discharge_date_source'] = {
+                            'file_id': chunk.file_id,
+                            'page_number': chunk.page_number,
+                            'chunk_id': chunk.id,
+                            'from_critical_scan': True
+                        }
+                        logger.info(f"[CRITICAL_SCAN] Found discharge date via full scan: {match.group(1)}")
+                        break
+                if extracted_data.get('discharge_date'):
+                    break
+        
+        # Scan for primary diagnosis if missing or empty
+        if not extracted_data.get('diagnoses') or len(extracted_data.get('diagnoses', [])) == 0:
+            primary_diag_patterns = [
+                r'primary\s+diagnosis[:\s]+([^\n]+)',
+                r'admitting\s+diagnosis[:\s]+([^\n]+)',
+                r'principal\s+diagnosis[:\s]+([^\n]+)',
+            ]
+            for chunk in all_chunks:
+                for pattern in primary_diag_patterns:
+                    match = re.search(pattern, chunk.chunk_text, re.IGNORECASE)
+                    if match:
+                        diagnosis_text = match.group(1).strip()
+                        if diagnosis_text and len(diagnosis_text) > 3:
+                            if 'diagnoses' not in extracted_data:
+                                extracted_data['diagnoses'] = []
+                            extracted_data['diagnoses'].insert(0, {
+                                'name': diagnosis_text,
+                                'type': 'primary',
+                                'source_file_id': chunk.file_id,
+                                'source_page': chunk.page_number,
+                                'from_critical_scan': True
+                            })
+                            logger.info(f"[CRITICAL_SCAN] Found primary diagnosis via full scan: {diagnosis_text[:50]}")
+                            break
+                if extracted_data.get('diagnoses') and len(extracted_data['diagnoses']) > 0:
+                    break
+        
+        return extracted_data
+    
     def _get_llm_service(self, db: Optional[Session] = None, user_id: Optional[str] = None):
         """Tier 1: OSS/OpenRouter for extraction (PHI allowed)."""
         if db and user_id:
@@ -132,8 +241,17 @@ class ClinicalAgent:
         all_chunks = []
 
         # 1. Prepare RAG contexts (Synchronous but fast)
-        # Comprehensive context
-        comprehensive_query = "medications prescriptions drugs dosage frequency labs laboratory results blood tests CBC BMP CMP diagnoses diagnosis impression assessment problem list procedures surgery operation intervention treatment vitals vital signs blood pressure heart rate temperature allergies adverse reactions imaging X-ray CT MRI ultrasound radiology study"
+        # Comprehensive context - using contextual phrases for better semantic matching
+        comprehensive_query = """
+Patient medications and prescriptions including dosage frequency and administration routes.
+Laboratory test results including blood tests, chemistry panels, complete blood count.
+Clinical diagnoses, assessment, and impression documented by physicians.
+Procedures, surgical interventions, and treatments performed during hospitalization.
+Vital signs monitoring including blood pressure, heart rate, temperature, respiratory rate, oxygen saturation.
+Known allergies and adverse drug reactions.
+Imaging studies and radiology reports including X-ray, CT scan, MRI, ultrasound findings.
+Admission information, chief complaint, and hospital course.
+"""
         context = rag_retriever.build_section_context(
             db=db,
             case_id=case_id,
@@ -252,21 +370,53 @@ class ClinicalAgent:
 
         # 4. Process Comprehensive Results
         try:
-            # Process Meds & Allergies
+            # Process Meds & Allergies with validation
             if isinstance(meds_result, dict):
-                all_data["medications"] = meds_result.get("medications", [])
-                all_data["allergies"] = meds_result.get("allergies", [])
+                # Validate medications
+                medications = meds_result.get("medications", [])
+                all_data["medications"] = self._validate_extraction_against_chunks(
+                    medications, context.chunks, item_name_key="name"
+                )
+                
+                # Validate allergies
+                allergies = meds_result.get("allergies", [])
+                all_data["allergies"] = self._validate_extraction_against_chunks(
+                    allergies, context.chunks, item_name_key="allergen"
+                )
             
-            # Process Labs, Imaging, Vitals
+            # Process Labs, Imaging, Vitals with validation
             if isinstance(labs_result, dict):
-                all_data["labs"] = labs_result.get("labs", [])
-                all_data["imaging"] = labs_result.get("imaging", [])
-                all_data["vitals"] = labs_result.get("vitals", [])
+                # Validate labs
+                labs = labs_result.get("labs", [])
+                all_data["labs"] = self._validate_extraction_against_chunks(
+                    labs, context.chunks, item_name_key="test_name"
+                )
+                
+                # Validate imaging
+                imaging = labs_result.get("imaging", [])
+                all_data["imaging"] = self._validate_extraction_against_chunks(
+                    imaging, context.chunks, item_name_key="study_type"
+                )
+                
+                # Validate vitals
+                vitals = labs_result.get("vitals", [])
+                all_data["vitals"] = self._validate_extraction_against_chunks(
+                    vitals, context.chunks, item_name_key="type"
+                )
             
-            # Process Diagnoses & Procedures
+            # Process Diagnoses & Procedures with validation
             if isinstance(diag_result, dict):
-                all_data["diagnoses"] = diag_result.get("diagnoses", [])
-                all_data["procedures"] = diag_result.get("procedures", [])
+                # Validate diagnoses
+                diagnoses = diag_result.get("diagnoses", [])
+                all_data["diagnoses"] = self._validate_extraction_against_chunks(
+                    diagnoses, context.chunks, item_name_key="name"
+                )
+                
+                # Validate procedures
+                procedures = diag_result.get("procedures", [])
+                all_data["procedures"] = self._validate_extraction_against_chunks(
+                    procedures, context.chunks, item_name_key="name"
+                )
             
             # Source matching for comprehensive
             source_types = ["medication", "lab", "diagnosis", "procedure", "vital", "allergy", "imaging"]
@@ -360,12 +510,127 @@ class ClinicalAgent:
         extraction_time = time.time() - extraction_start
         logger.info(f"[TIMING] Total parallel extraction completed in {extraction_time:.2f}s for case {case_id}")
         
+        # Scan for critical fields that may have been missed by RAG
+        try:
+            scan_start = time.time()
+            all_data = self._scan_for_critical_fields(db, case_id, all_data)
+            scan_time = time.time() - scan_start
+            logger.info(f"[TIMING] Critical field scan completed in {scan_time:.2f}s for case {case_id}")
+        except Exception as e:
+            logger.error(f"[CRITICAL_SCAN] Error scanning for critical fields: {e}", exc_info=True)
+            # Continue without critical scan - non-fatal
+        
+        # Log coverage metrics
+        total_chunks = len(context.chunks) + len(history_context.chunks) + len(social_factors_context.chunks) + len(therapy_context.chunks)
+        unique_chunks = len(set(all_chunks))
+        
+        # Get total chunks for case
+        from app.repositories.chunk_repository import chunk_repository
+        total_case_chunks = chunk_repository.count_by_case(db, case_id)
+        
+        coverage_pct = (unique_chunks / total_case_chunks * 100) if total_case_chunks > 0 else 0
+        
+        logger.info(f"[COVERAGE] Case {case_id}: Retrieved {unique_chunks}/{total_case_chunks} chunks ({coverage_pct:.1f}% coverage)")
+        
+        # Count verified vs unverified items
+        verified_counts = {}
+        for key in ["medications", "labs", "diagnoses", "procedures", "vitals", "allergies", "imaging"]:
+            items = all_data.get(key, [])
+            verified = sum(1 for item in items if item.get('is_verified', False))
+            verified_counts[key] = f"{verified}/{len(items)}"
+        
+        logger.info(f"[VALIDATION] Verified items: {verified_counts}")
+        
+        # Log low confidence items
+        low_confidence_items = []
+        confidence_threshold = 0.5
+        for key in ["medications", "labs", "diagnoses", "procedures", "vitals", "allergies", "imaging"]:
+            items = all_data.get(key, [])
+            for item in items:
+                if item.get('confidence_score', 1.0) < confidence_threshold:
+                    low_confidence_items.append({
+                        'type': key,
+                        'item': item.get('name') or item.get('test_name') or item.get('allergen') or str(item),
+                        'confidence': item.get('confidence_score', 0.0)
+                    })
+        
+        if low_confidence_items:
+            logger.warning(f"[VALIDATION] Case {case_id} has {len(low_confidence_items)} low-confidence items")
+            for lc_item in low_confidence_items[:5]:  # Log first 5
+                logger.warning(f"  - {lc_item['type']}: {lc_item['item']} (confidence: {lc_item['confidence']:.2f})")
+        
         return ExtractionResult(
             data=all_data,
             sources=all_sources,
             chunks_used=list(set(all_chunks))
         )
 
+    def _validate_extraction_against_chunks(
+        self,
+        extracted_items: List[Dict],
+        chunks: List,
+        item_name_key: str = "name"
+    ) -> List[Dict]:
+        """
+        Validate extracted items against source chunks
+        
+        Adds validation metadata to each item:
+        - is_verified: bool (True if item text found in chunks)
+        - confidence_score: float (0-1, based on chunk score and term prominence)
+        - matching_chunks: List[str] (chunk_ids where item was found)
+        
+        Args:
+            extracted_items: List of extracted items to validate
+            chunks: List of RetrievedChunk objects used for extraction
+            item_name_key: Key to use for searching (e.g., "name", "test_name", "allergen")
+            
+        Returns:
+            List of validated items with added metadata
+        """
+        validated_items = []
+        
+        for item in extracted_items:
+            # Get searchable text from item
+            search_term = str(item.get(item_name_key) or item.get("test_name") or item.get("allergen") or item.get("study_type") or "")
+            
+            if not search_term or len(search_term) < 2:
+                # Can't validate without search term
+                item['is_verified'] = False
+                item['confidence_score'] = 0.0
+                item['matching_chunks'] = []
+                validated_items.append(item)
+                continue
+            
+            # Search for term in chunks
+            matching_chunks = []
+            best_match_score = 0.0
+            
+            for chunk in chunks:
+                chunk_text_lower = chunk.chunk_text.lower()
+                search_term_lower = search_term.lower()
+                
+                # Simple substring match
+                if search_term_lower in chunk_text_lower:
+                    matching_chunks.append(chunk.chunk_id)
+                    
+                    # Calculate match quality
+                    # Factor 1: Chunk relevance score (from RAG)
+                    # Factor 2: Search term prominence in chunk
+                    term_count = chunk_text_lower.count(search_term_lower)
+                    prominence = min(1.0, term_count / 10.0)  # Cap at 10 mentions
+                    
+                    match_score = (chunk.score * 0.7) + (prominence * 0.3)
+                    best_match_score = max(best_match_score, match_score)
+            
+            # Set validation metadata
+            item['is_verified'] = len(matching_chunks) > 0
+            item['confidence_score'] = best_match_score if matching_chunks else 0.0
+            item['matching_chunks'] = matching_chunks[:3]  # Top 3 chunks
+            
+            validated_items.append(item)
+        
+        return validated_items
+    
     async def extract_medications(self, db: Session, case_id: str, user_id: str) -> ExtractionResult:
         """Extract medications using all available chunks (async)"""
         return await self._extract_generic(

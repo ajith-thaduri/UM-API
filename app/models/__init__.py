@@ -28,6 +28,8 @@ from app.models.version_history import VersionHistory, VersionEventType
 from app.models.token_blacklist import TokenBlacklist
 from app.models.case_date_shift import CaseDateShift
 from app.models.privacy_vault import PrivacyVault
+from app.models.presidio_engine import PresidioEngine
+from app.models.llm_model import LLMModel
 
 __all__ = [
     "Base",
@@ -60,5 +62,8 @@ __all__ = [
     "VersionHistory",
     "VersionEventType",
     "CaseDateShift",
+    "PrivacyVault",  # Added if missing
+    "PresidioEngine",
+    "LLMModel",
 ]
 

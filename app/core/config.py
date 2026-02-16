@@ -111,6 +111,17 @@ class Settings(BaseSettings):
     # Chunking Configuration
     CHUNK_SIZE: int = 800  # Target tokens per chunk
     
+    # RAG Adaptive Retrieval Configuration
+    ENABLE_ADAPTIVE_TOP_K: bool = True  # Enable document-size-aware top_k
+    TOP_K_MIN: int = 20  # Minimum chunks to retrieve
+    TOP_K_MAX: int = 100  # Maximum chunks to retrieve
+    TOP_K_BASE: int = 30  # Base top_k for small documents
+    
+    # Extraction Validation Configuration
+    ENABLE_EXTRACTION_VALIDATION: bool = True  # Enable validation against source chunks
+    EXTRACTION_CONFIDENCE_THRESHOLD: float = 0.5  # Flag items below this threshold
+    ENABLE_CRITICAL_FIELD_SCAN: bool = True  # Full document scan for critical fields (admission/discharge dates)
+    
     # SFTP Configuration
     SFTP_ENABLED: bool = False  # Enable/disable SFTP ingest
     SFTP_HOST: str = "localhost"
@@ -189,9 +200,9 @@ class Settings(BaseSettings):
     
     # Presidio De-Identification Configuration
     PRESIDIO_LANGUAGE: str = "en"
-    PRESIDIO_NER_ENGINE: str = "spacy"  # "spacy" or "transformers"
+    PRESIDIO_NER_ENGINE: str = "transformers"  # "spacy" or "transformers"
     PRESIDIO_NER_MODEL: str = "en_core_web_lg"  # spaCy model (used when engine=spacy)
-    PRESIDIO_TRANSFORMER_MODEL: str = "obi/deid_roberta_i2b2"  # HuggingFace model (used when engine=transformers)
+    PRESIDIO_TRANSFORMER_MODEL: str = "StanfordAIMI/stanford-deidentifier-base"  # HuggingFace model (used when engine=transformers). Default: Stanford AIMI PubMedBERT-based medical de-identifier
     PRESIDIO_ENTITIES: List[str] = [
         "PERSON",
         "PHONE_NUMBER",
@@ -200,7 +211,7 @@ class Settings(BaseSettings):
         "LOCATION",
         "ORGANIZATION",
     ]
-    PRESIDIO_FREE_TEXT_THRESHOLD: float = 0.7  # Aggressive for free-text scanning
+    PRESIDIO_FREE_TEXT_THRESHOLD: float = 0.9  # Required by compliance: only redact if confidence >= 0.9
     PRESIDIO_PREFLIGHT_THRESHOLD: float = 0.9  # Ultra-sensitive for pre-flight validation
     
     # Token Format (UUID12 = 48 bits, ~281 trillion combinations)

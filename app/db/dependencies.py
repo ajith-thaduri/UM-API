@@ -14,7 +14,9 @@ from app.repositories.dashboard_snapshot_repository import DashboardSnapshotRepo
 from app.repositories.facet_repository import FacetRepository
 from app.repositories.source_link_repository import SourceLinkRepository
 from app.repositories.user_preference_repository import UserPreferenceRepository
+from app.repositories.user_preference_repository import UserPreferenceRepository
 from app.repositories.usage_metrics_repository import UsageMetricsRepository
+from app.repositories.llm_model_repository import LLMModelRepository
 
 
 def get_case_repository(db: Session = Depends(get_db)) -> CaseRepository:
@@ -84,4 +86,11 @@ def get_usage_metrics_repository(
 ) -> UsageMetricsRepository:
     """Get UsageMetricsRepository instance"""
     return UsageMetricsRepository()
+
+
+def get_llm_model_repository(
+    db: Session = Depends(get_db),
+) -> LLMModelRepository:
+    """Get LLMModelRepository instance"""
+    return LLMModelRepository()
 

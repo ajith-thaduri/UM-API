@@ -64,6 +64,51 @@ class RAGRetriever:
 
     def __init__(self):
         self.max_context_tokens = 8000  # Leave room for prompt and response
+    
+    def _compute_adaptive_top_k(
+        self,
+        db: Session,
+        case_id: str,
+        base_top_k: int = 20,
+        min_top_k: int = 20,
+        max_top_k: int = 100
+    ) -> int:
+        """
+        Compute adaptive top_k based on document size
+        
+        Strategy:
+        - Small docs (< 50 chunks): use base_top_k (20-30) or up to 100% of chunks
+        - Medium docs (50-200 chunks): scale proportionally (40-60% coverage)
+        - Large docs (> 200 chunks): cap at max_top_k (25-40% coverage)
+        
+        Goal: Retrieve 50-100% of chunks for small docs, 25-50% for large docs
+        
+        Args:
+            db: Database session
+            case_id: Case ID
+            base_top_k: Base top_k for small documents
+            min_top_k: Minimum chunks to retrieve
+            max_top_k: Maximum chunks to retrieve
+            
+        Returns:
+            Adaptive top_k value
+        """
+        from app.repositories.chunk_repository import chunk_repository
+        
+        total_chunks = chunk_repository.count_by_case(db, case_id)
+        
+        if total_chunks <= 50:
+            # Small document: retrieve 50-100% of chunks
+            adaptive_k = min(total_chunks, base_top_k * 2)
+        elif total_chunks <= 200:
+            # Medium document: retrieve 40-60% of chunks
+            adaptive_k = int(total_chunks * 0.5)
+        else:
+            # Large document: retrieve 25-40% of chunks
+            adaptive_k = int(total_chunks * 0.35)
+        
+        # Clamp to min/max
+        return max(min_top_k, min(adaptive_k, max_top_k))
 
     def retrieve_for_query(
         self,
@@ -71,7 +116,8 @@ class RAGRetriever:
         query: str,
         case_id: str,
         user_id: str,
-        top_k: int = 20  # Final number of results after reranking
+        top_k: Optional[int] = None,  # Final number of results after reranking (optional for adaptive)
+        use_adaptive: bool = True  # Enable adaptive top_k based on document size
     ) -> List[RetrievedChunk]:
         """
         Retrieve relevant chunks for a query - all chunks, no section filtering
@@ -82,11 +128,21 @@ class RAGRetriever:
             query: Search query
             case_id: Case to search within
             user_id: User ID for scoping
-            top_k: Number of final results to return (after reranking if enabled)
+            top_k: Number of final results to return (optional, uses adaptive if None)
+            use_adaptive: Enable adaptive top_k based on document size
             
         Returns:
             List of retrieved chunks with scores
         """
+        # Compute adaptive top_k if not specified
+        if top_k is None or use_adaptive:
+            adaptive_k = self._compute_adaptive_top_k(db, case_id, base_top_k=top_k or 20)
+            if use_adaptive:
+                top_k = adaptive_k
+                logger.info(f"Using adaptive top_k={top_k} for case {case_id}")
+            elif top_k is None:
+                top_k = adaptive_k
+        
         # Generate query embedding
         query_embedding = embedding_service.generate_query_embedding(query)
         
@@ -435,7 +491,8 @@ class RAGRetriever:
         section_types: List[SectionType],  # Kept for backward compatibility but ignored
         query: Optional[str] = None,
         max_tokens: Optional[int] = None,
-        ensure_file_diversity: bool = False
+        ensure_file_diversity: bool = False,
+        use_adaptive_top_k: bool = True  # Enable adaptive top_k based on document size
     ) -> RAGContext:
         """
         Build context from all chunks - section_types parameter is ignored
@@ -449,18 +506,23 @@ class RAGRetriever:
             query: Optional query for relevance ranking
             max_tokens: Maximum tokens
             ensure_file_diversity: If True, ensures chunks from all files are included
+            use_adaptive_top_k: Enable adaptive top_k based on document size
             
         Returns:
             RAGContext for all relevant chunks
         """
         if query:
+            # Compute adaptive top_k if enabled
+            adaptive_k = self._compute_adaptive_top_k(db, case_id, base_top_k=30) if use_adaptive_top_k else 30
+            
             # Use semantic search to get most relevant chunks
             all_chunks = self.retrieve_for_query(
                 db=db,
                 query=query,
                 case_id=case_id,
                 user_id=user_id,
-                top_k=30  # Increased to get more context
+                top_k=adaptive_k,
+                use_adaptive=use_adaptive_top_k
             )
         else:
             # Get all chunks for case

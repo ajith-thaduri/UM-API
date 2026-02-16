@@ -39,7 +39,23 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models.privacy_vault import PrivacyVault
+from app.models.presidio_engine import PresidioEngine
+from app.db.session import SessionLocal
 from app.services.phi_validator import phi_validator, PHILeakageError
+from app.services.date_shift_service import date_shift_service
+from app.services.presidio_recognizers import (
+    MRNRecognizer,
+    TimeRecognizer,
+    HospitalRecognizer,
+    DoctorRecognizer,
+    FullNameRecognizer,
+    CityRecognizer,
+    DOBRecognizer,
+    StreetRecognizer,
+    ZipRecognizer,
+    NPIRecognizer,
+    InsuranceRecognizer
+)
 from app.utils.safe_logger import get_safe_logger
 
 safe_logger = get_safe_logger(__name__)
@@ -54,17 +70,21 @@ except ImportError:
     PRESIDIO_AVAILABLE = False
     safe_logger.warning("Presidio not available - de-identification disabled")
 
-# obi/deid_roberta_i2b2 label -> Presidio entity mapping
-# The model predicts i2b2 PHI categories; we map them to Presidio types
+# Transformer model label -> Presidio entity mapping
+# Maps medical PHI categories to standard Presidio types
 ROBERTA_LABEL_TO_PRESIDIO = {
+    # Common labels
     "PATIENT": "PERSON",
     "STAFF": "PERSON",
+    "HCW": "PERSON",          # Stanford label (Healthcare Worker)
     "AGE": "AGE",
     "DATE": "DATE_TIME",
     "PHONE": "PHONE_NUMBER",
     "EMAIL": "EMAIL_ADDRESS",
     "ID": "ID",
-    "HOSP": "ORGANIZATION",
+    "HOSP": "ORGANIZATION",      # i2b2 label
+    "HOSPITAL": "ORGANIZATION",  # Stanford label
+    "VENDOR": "ORGANIZATION",    # Stanford label
     "PATORG": "ORGANIZATION",
     "LOC": "LOCATION",
     "OTHERPHI": "NRP",
@@ -116,7 +136,30 @@ FREE_TEXT_FIELDS = {
     "summary",
 }
 
-# Date field keywords (for structure-aware shifting)
+# Entity priority map (higher number = higher priority)
+# Ensures custom medical entities win over generic NER labels
+ENTITY_PRIORITY = {
+    "PROVIDER": 100,
+    "PROVIDER": 100,
+    "NPI": 95,
+    "INSURANCE_ID": 92,
+    "PATIENT_FULL_NAME": 90,
+    "PATIENT_FULL_NAME": 90,
+    "MRN": 85,
+    "STREET_ADDRESS": 82,
+    "CITY": 80,
+    "ZIP_CODE": 78,
+    "HOSPITAL": 75,
+    "SEX": 70,
+    "AGE": 65,
+    "TIME": 60,
+    "DATE_TIME": 55,
+    "PERSON": 50,
+    "LOCATION": 45,
+    "ORGANIZATION": 40,
+    "ID": 35,
+    "PHONE_NUMBER": 30,
+}
 DATE_FIELD_KEYWORDS = {
     "date",
     "time",
@@ -137,18 +180,73 @@ class PresidioDeIdentificationService:
         self.anonymizer = None
         self.active_ner_engine: str = "spacy"
         self.active_model_name: str = "en_core_web_lg"
+        self.active_engine_id: Optional[str] = None
+        self.custom_recognizers = [
+            MRNRecognizer,
+            TimeRecognizer,
+            HospitalRecognizer,
+            DoctorRecognizer,
+            FullNameRecognizer,
+            CityRecognizer,
+            DOBRecognizer,
+            StreetRecognizer,
+            ZipRecognizer,
+            NPIRecognizer,
+            InsuranceRecognizer
+        ]
 
         if PRESIDIO_AVAILABLE:
             try:
                 self.anonymizer = AnonymizerEngine()
-                # Initialize with configured engine
-                engine_type = getattr(settings, "PRESIDIO_NER_ENGINE", "spacy")
-                self._init_analyzer(engine_type)
+                # Initialize from DB
+                self._load_active_engine_from_db()
                 safe_logger.info(
-                    f"PresidioDeIdentificationService initialized with NER engine: {engine_type}"
+                    f"PresidioDeIdentificationService initialized with NER engine: {self.active_ner_engine}"
                 )
             except Exception as e:
                 safe_logger.error(f"Failed to initialize Presidio: {e}")
+
+    def _load_active_engine_from_db(self):
+        """Load the currently active engine configuration from the database."""
+        db = SessionLocal()
+        try:
+            active_engine = db.query(PresidioEngine).filter(PresidioEngine.is_active == True).first()
+            
+            if active_engine:
+                self.active_ner_engine = active_engine.engine_type
+                self.active_model_name = active_engine.model_name
+                self.active_engine_id = active_engine.id
+                safe_logger.info(f"Loading active engine from DB: {active_engine.name} ({active_engine.engine_type})")
+            else:
+                # Fallback to config default (Stanford AIMI when PRESIDIO_NER_ENGINE=transformers)
+                self.active_ner_engine = getattr(settings, "PRESIDIO_NER_ENGINE", "transformers")
+                if self.active_ner_engine == "transformers":
+                    self.active_model_name = getattr(settings, "PRESIDIO_TRANSFORMER_MODEL", "StanfordAIMI/stanford-deidentifier-base")
+                else:
+                    self.active_model_name = getattr(settings, "PRESIDIO_NER_MODEL", "en_core_web_lg")
+                self.active_engine_id = None
+                safe_logger.info(f"No active engine in DB, using config default: {self.active_ner_engine} / {self.active_model_name}")
+
+            # Initialize the appropriate engine
+            if self.active_ner_engine == "transformers":
+                self._init_transformers_engine()
+            else:
+                self._init_spacy_engine()
+                
+            # Register custom recognizers
+            self._register_custom_recognizers()
+        except Exception as e:
+            safe_logger.error(f"Error loading engine from DB: {e}")
+            # Emergency fallback: use config default (Stanford AIMI)
+            self.active_ner_engine = getattr(settings, "PRESIDIO_NER_ENGINE", "transformers")
+            if self.active_ner_engine == "transformers":
+                self.active_model_name = getattr(settings, "PRESIDIO_TRANSFORMER_MODEL", "StanfordAIMI/stanford-deidentifier-base")
+                self._init_transformers_engine()
+            else:
+                self.active_model_name = getattr(settings, "PRESIDIO_NER_MODEL", "en_core_web_lg")
+                self._init_spacy_engine()
+        finally:
+            db.close()
 
     def _init_analyzer(self, engine_type: str):
         """Initialize the analyzer engine with the specified NER backend."""
@@ -160,7 +258,11 @@ class PresidioDeIdentificationService:
     def _init_spacy_engine(self):
         """Initialize with spaCy NLP engine (default)."""
         try:
-            model_name = getattr(settings, "PRESIDIO_NER_MODEL", "en_core_web_lg")
+            # Use active_model_name if it's a spacy model (no /), otherwise default to en_core_web_lg
+            model_name = self.active_model_name
+            if not model_name or "/" in model_name:
+                model_name = getattr(settings, "PRESIDIO_NER_MODEL", "en_core_web_lg")
+
             nlp_config = {
                 "nlp_engine_name": "spacy",
                 "models": [{"lang_code": "en", "model_name": model_name}],
@@ -176,9 +278,12 @@ class PresidioDeIdentificationService:
             raise
 
     def _init_transformers_engine(self):
-        """Initialize with HuggingFace transformers engine (e.g. obi/deid_roberta_i2b2)."""
+        """Initialize with HuggingFace transformers engine."""
         try:
-            model_name = getattr(settings, "PRESIDIO_TRANSFORMER_MODEL", "obi/deid_roberta_i2b2")
+            # Use active_model_name if it's a transformer model (contains /), otherwise default
+            model_name = self.active_model_name
+            if not model_name or "/" not in model_name:
+                model_name = getattr(settings, "PRESIDIO_TRANSFORMER_MODEL", "obi/deid_roberta_i2b2")
             
             nlp_config = {
                 "nlp_engine_name": "transformers",
@@ -189,6 +294,7 @@ class PresidioDeIdentificationService:
                         "transformers": model_name,
                     },
                 }],
+                "model_to_presidio_entity_mapping": ROBERTA_LABEL_TO_PRESIDIO,
             }
             
             nlp_engine = NlpEngineProvider(nlp_configuration=nlp_config).create_engine()
@@ -202,46 +308,111 @@ class PresidioDeIdentificationService:
             safe_logger.warning("Falling back to spaCy engine")
             self._init_spacy_engine()
 
-    def switch_ner_engine(self, engine_type: str) -> dict:
+    def _register_custom_recognizers(self):
+        """Register all custom medical PHI recognizers into the current analyzer instance."""
+        if not self.analyzer:
+            return
+            
+        # Get list of currently registered entity types
+        registered_entities = []
+        for r in self.analyzer.registry.recognizers:
+            if hasattr(r, 'supported_entities'):
+                registered_entities.extend(r.supported_entities)
+            
+        for recognizer in self.custom_recognizers:
+            # Check if already registered to avoid duplicates
+            entity_type = recognizer.supported_entities[0] if hasattr(recognizer, 'supported_entities') else None
+            if entity_type and entity_type not in registered_entities:
+                self.analyzer.registry.add_recognizer(recognizer)
+                safe_logger.debug(f"Registered custom recognizer: {entity_type}")
+        
+        safe_logger.info(f"Custom HIPAA recognizers registered. Total: {len(self.custom_recognizers)}")
+
+    def switch_ner_engine(self, engine_type: str = None, model_id: str = None) -> Dict[str, Any]:
         """
-        Switch the NER engine at runtime.
+        Switch the NER engine at runtime using either engine_type (legacy) or model_id (DB).
         
         Args:
-            engine_type: "spacy" or "transformers"
+            engine_type: "spacy" or "transformers" (optional, legacy behavior)
+            model_id: UUID of the model in presidio_engines table (preferred)
             
         Returns:
             dict with status info
         """
-        if engine_type not in NER_MODEL_REGISTRY:
-            return {"success": False, "error": f"Unknown engine: {engine_type}. Use 'spacy' or 'transformers'."}
-        
-        if engine_type == self.active_ner_engine:
-            return {
-                "success": True,
-                "message": f"Already using {engine_type}",
-                "active_engine": self.active_ner_engine,
-                "active_model": self.active_model_name,
-            }
-        
-        try:
-            self._init_analyzer(engine_type)
-            return {
-                "success": True,
-                "message": f"Switched to {engine_type} engine",
-                "active_engine": self.active_ner_engine,
-                "active_model": self.active_model_name,
-            }
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+        if not PRESIDIO_AVAILABLE:
+            return {"status": "error", "message": "Presidio not available"}
 
-    def get_engine_info(self) -> dict:
-        """Return current NER engine info and available models."""
-        return {
-            "active_engine": self.active_ner_engine,
-            "active_model": self.active_model_name,
-            "available_models": NER_MODEL_REGISTRY,
-            "presidio_available": PRESIDIO_AVAILABLE,
-        }
+        db = SessionLocal()
+        try:
+            target_engine = None
+            
+            if model_id:
+                # Switch by ID
+                target_engine = db.query(PresidioEngine).filter(PresidioEngine.id == model_id).first()
+                if not target_engine:
+                    return {"status": "error", "message": f"Model ID {model_id} not found"}
+            
+            elif engine_type:
+                # Legacy switch by type - find first available matching type
+                target_engine = db.query(PresidioEngine).filter(PresidioEngine.engine_type == engine_type).first()
+                if not target_engine:
+                    return {"status": "error", "message": f"No engine found for type {engine_type}"}
+
+            if not target_engine:
+                return {"status": "error", "message": "No model specified"}
+
+            # Update DB to set this as active
+            # 1. Set all to inactive
+            db.query(PresidioEngine).update({PresidioEngine.is_active: False})
+            # 2. Set target to active
+            target_engine.is_active = True
+            db.commit()
+            
+            # Reload in service
+            self._load_active_engine_from_db()
+
+            return {
+                "status": "success",
+                "active_engine": self.active_ner_engine,
+                "active_model": self.active_model_name,
+                "active_id": self.active_engine_id,
+                "message": f"Switched to {target_engine.name}"
+            }
+            
+        except Exception as e:
+            db.rollback()
+            safe_logger.error(f"Failed to switch engine: {e}")
+            return {"status": "error", "message": str(e)}
+        finally:
+            db.close()
+
+    def get_engine_info(self) -> Dict[str, Any]:
+        """Return current NER engine info and available models from DB."""
+        if not PRESIDIO_AVAILABLE:
+             return {"status": "Presidio not available", "available_models": [], "active_engine": None}
+             
+        db = SessionLocal()
+        try:
+            available_models = db.query(PresidioEngine).all()
+            
+            return {
+                "active_engine": self.active_ner_engine,
+                "active_model": self.active_model_name,
+                "active_id": self.active_engine_id,
+                "available_models": [
+                    {
+                        "id": m.id,
+                        "name": m.name,
+                        "engine_type": m.engine_type,
+                        "model_name": m.model_name,
+                        "description": m.description,
+                        "is_active": m.is_active
+                    } for m in available_models
+                ],
+                "presidio_available": PRESIDIO_AVAILABLE,
+            }
+        finally:
+            db.close()
 
     def de_identify_for_summary(
         self,
@@ -253,7 +424,8 @@ class PresidioDeIdentificationService:
         clinical_data: Dict,
         red_flags: List[Dict],
         case_metadata: Optional[Dict] = None,
-    ) -> Tuple[Dict, str]:
+        score_threshold: Optional[float] = None
+    ) -> Tuple[Dict, str, Dict[str, str]]:
         """
         Main entry point: De-identify all data before sending to Tier 2 (Claude).
 
@@ -266,6 +438,10 @@ class PresidioDeIdentificationService:
         safe_logger.info(f"Starting de-identification for case {case_id}")
 
         case_metadata = case_metadata or {}
+        
+        # Use config threshold if not provided
+        if score_threshold is None:
+            score_threshold = settings.PRESIDIO_FREE_TEXT_THRESHOLD
 
         # Step 1: Generate date shift offset
         shift_days = random.randint(
@@ -343,7 +519,7 @@ class PresidioDeIdentificationService:
             f"{len(token_map)} tokens, {len(shifted_fields)} date shifts, vault_id={vault_entry.id}"
         )
 
-        return de_id_payload, vault_entry.id
+        return de_id_payload, vault_entry.id, token_map
 
     def re_identify_summary(
         self, db: Session, vault_id: str, summary_text: str
@@ -423,23 +599,27 @@ class PresidioDeIdentificationService:
 
     def _generate_tokens(self, known_phi: Dict[str, str]) -> Dict[str, str]:
         """
-        Generate unique UUID12 tokens for known PHI.
+        Generate unique counter-based tokens (e.g., [[PERSON-01]]) for known PHI.
 
         Returns Dict mapping token → original value (reverse of known_phi)
-        Format: [[TYPE::uuid12]] where uuid12 is 48-bit (12 hex chars)
         """
         token_map = {}
-        uuid_length = getattr(settings, "TOKEN_UUID_LENGTH", 12)
+        # Track counters per entity type
+        counters = {}
 
-        for phi_value, entity_type in known_phi.items():
-            # Generate unique UUID token
-            token_uuid = uuid.uuid4().hex[:uuid_length]
-            token = f"[[{entity_type}::{token_uuid}]]"
+        # Sorting ensures deterministic assignment order
+        for phi_value, entity_type in sorted(known_phi.items()):
+            # Increment counter for this type
+            current_count = counters.get(entity_type, 0) + 1
+            counters[entity_type] = current_count
+            
+            # Format: [[TYPE-01]]
+            token = f"[[{entity_type}-{current_count:02d}]]"
 
             # Store mapping (token → original)
             token_map[token] = phi_value
 
-        safe_logger.info(f"Generated {len(token_map)} UUID{uuid_length} tokens")
+        safe_logger.info(f"Generated {len(token_map)} counter tokens")
         return token_map
 
     def _replace_known_phi(self, data: Any, token_map: Dict[str, str]) -> Any:
@@ -539,8 +719,11 @@ class PresidioDeIdentificationService:
             return date_str
 
     def _presidio_scan_free_text(
-        self, data: Any, token_map: Dict[str, str]
+        self, data: Any, token_map: Dict[str, str], score_threshold: Optional[float] = None
     ) -> Any:
+        # Use config threshold if not provided
+        if score_threshold is None:
+            score_threshold = settings.PRESIDIO_FREE_TEXT_THRESHOLD
         """
         Scan free-text fields with Presidio to catch any PHI leaks.
         
@@ -556,7 +739,7 @@ class PresidioDeIdentificationService:
                 for key, value in obj.items():
                     # Check if this is a free-text field
                     if isinstance(value, str) and key.lower() in FREE_TEXT_FIELDS:
-                        self._process_single_string(obj, key, value, token_map)
+                        self._process_single_string(obj, key, value, token_map, score_threshold=score_threshold)
                     
                     # Recurse
                     elif isinstance(value, (dict, list)):
@@ -569,26 +752,92 @@ class PresidioDeIdentificationService:
         _scan_recursive(data)
         return data
 
+    def _filter_email_person_overlap(self, results):
+        """
+        Filter out PERSON entities that overlap with EMAIL_ADDRESS entities.
+        Handles cases where 'john.doe@email.com' is detected as PERSON 'john.doe'.
+        """
+        filtered = []
+        
+        # Pre-calculate emails to avoid O(N^2) lookups if possible, 
+        # but N is usually small (<100 entities).
+        emails = [r for r in results if r.entity_type == "EMAIL_ADDRESS"]
+        
+        for r in results:
+            if r.entity_type == "PERSON":
+                # Check for any overlap with an EMAIL_ADDRESS
+                overlaps_email = any(
+                    not (r.end <= e.start or r.start >= e.end)
+                    for e in emails
+                )
+                
+                if overlaps_email:
+                    continue
+
+            filtered.append(r)
+            
+        return filtered
+
     def _process_single_string(
-        self, parent_obj: Dict, key: str, text: str, token_map: Dict[str, str]
+        self, parent_obj: Any, key: Any, text: str, token_map: Dict[str, str], score_threshold: Optional[float] = None
     ):
-        """Analyze and redact a single string value"""
+        # Use config threshold if not provided
+        if score_threshold is None:
+            score_threshold = settings.PRESIDIO_FREE_TEXT_THRESHOLD
+        """Analyze and redact a single string value with overlap handling"""
         try:
-            results = self.analyzer.analyze(text=text, language='en')
+            # Pass user-requested threshold to Presidio
+            results = self.analyzer.analyze(text=text, language='en', score_threshold=score_threshold)
             if not results:
                 return
 
+            # Filter overlapping email/person logic
+            # This handles cases like 'john.doe@example.com' being detected as PERSON 'john.doe'
+            results = self._filter_email_person_overlap(results)
+
+            # Filter overlapping spans
+            # 1. Sort by start index
+            results.sort(key=lambda x: x.start)
+            
+            filtered_results = []
+            if results:
+                last_end = -1
+                # Resolve overlapping entities
+                # Priority: 
+                # 1. Start position (earlier wins)
+                # 2. Entity Priority (custom medical entities win)
+                # 3. Span length (longer wins)
+                # 4. Score (more confident wins)
+                for res in sorted(results, key=lambda x: (
+                    x.start, 
+                    -ENTITY_PRIORITY.get(x.entity_type, 0), 
+                    -(x.end - x.start), 
+                    -x.score
+                )):
+                    if res.start >= last_end:
+                        # Only handle entities that meet the threshold
+                        if res.score >= score_threshold:
+                            filtered_results.append(res)
+                            last_end = res.end
+
             # Sort results by start index descending to replace from end
-            results.sort(key=lambda x: x.start, reverse=True)
+            filtered_results.sort(key=lambda x: x.start, reverse=True)
             
             new_text = text
-            for res in results:
-                # Only handle high-confidence sensitive types
-                if res.score < 0.4:
-                    continue
-                    
-                entity_text = text[res.start:res.end]
+            for res in filtered_results:
+                # Trim whitespace from the span to avoid swallowing newlines/punctuation
+                span_text = text[res.start:res.end]
+                prefix_ws = len(span_text) - len(span_text.lstrip())
+                suffix_ws = len(span_text) - len(span_text.rstrip())
+                
+                actual_start = res.start + prefix_ws
+                actual_end = res.end - suffix_ws
+                
+                entity_text = text[actual_start:actual_end]
                 entity_type = res.entity_type
+                
+                if not entity_text:
+                    continue
                 
                 # Check if we already have a token for this EXACT value
                 existing_token = None
@@ -598,9 +847,27 @@ class PresidioDeIdentificationService:
                         break
                 
                 if not existing_token:
-                    # Generate new token
-                    token_uuid = uuid.uuid4().hex[:12]
-                    existing_token = f"[[{entity_type}::{token_uuid}]]"
+                    # Generate new token with counter format [[TYPE-01]]
+                    # We need to track counters for this request.
+                    # Since this method is stateless regarding counters, we need to infer from existing tokens
+                    # or better, change the architecture to pass a counter state.
+                    # For now, let's parse existing tokens to find max index for this type.
+                    
+                    max_index = 0
+                    prefix = f"[[{entity_type}-"
+                    for tok in token_map.keys():
+                        if tok.startswith(prefix) and tok.endswith("]]"):
+                            try:
+                                # Extract number from [[TYPE-01]]
+                                number_part = tok[len(prefix):-2]
+                                idx = int(number_part)
+                                if idx > max_index:
+                                    max_index = idx
+                            except ValueError:
+                                continue
+                    
+                    new_index = max_index + 1
+                    existing_token = f"[[{entity_type}-{new_index:02d}]]"
                     token_map[existing_token] = entity_text
                 
                 # Verify token format to avoid double-tokenizing
@@ -608,7 +875,7 @@ class PresidioDeIdentificationService:
                     continue  # Already tokenized
 
                 # Replace in string
-                new_text = new_text[:res.start] + existing_token + new_text[res.end:]
+                new_text = new_text[:actual_start] + existing_token + new_text[actual_end:]
             
             parent_obj[key] = new_text
 
@@ -617,27 +884,14 @@ class PresidioDeIdentificationService:
 
     def _reverse_dates_in_text(self, text: str, shift_days: int) -> str:
         """
-        Best-effort reversal of ISO dates in narrative text.
-
-        Note: Claude may rephrase dates, so this is approximate.
-        Structure-aware reversal uses shifted_fields for precision.
+        Best-effort reversal of dates in narrative text using robust regex patterns.
         """
         if shift_days == 0:
             return text
 
-        # Find all ISO-style dates (YYYY-MM-DD)
-        date_pattern = r'\b(\d{4})-(\d{2})-(\d{2})\b'
-
-        def reverse_date(match):
-            try:
-                date_str = match.group(0)
-                dt = datetime.strptime(date_str, "%Y-%m-%d")
-                reversed_dt = dt - timedelta(days=shift_days)
-                return reversed_dt.strftime("%Y-%m-%d")
-            except Exception:
-                return match.group(0)
-
-        return re.sub(date_pattern, reverse_date, text)
+        # Use the robust reidentify_summary_text from date_shift_service
+        # which internally uses subtract logic (direction=-1)
+        return date_shift_service.reidentify_summary_text(text, shift_days)
 
 
 # Singleton instance

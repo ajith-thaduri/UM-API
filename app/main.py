@@ -26,6 +26,17 @@ async def lifespan(app: FastAPI):
     loop.set_exception_handler(handle_task_exception)
     logger.info("Application startup complete")
     
+    # Init Models
+    try:
+        from app.db.session import SessionLocal
+        from app.repositories.llm_model_repository import LLMModelRepository
+        db = SessionLocal()
+        LLMModelRepository().seed_defaults(db)
+        db.close()
+        logger.info("LLM Models seeded successfully")
+    except Exception as e:
+        logger.warning(f"Failed to seed LLM models: {e}")
+    
     yield
     
     # Cleanup on application shutdown

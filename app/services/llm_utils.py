@@ -12,10 +12,14 @@ EXTRACTION_RULES = """
 
 EXTRACTION RULES:
 1. Return ONLY valid JSON. Do not include markdown code fences.
-2. Extract each unique clinical entity ONCE per date.
-3. If the same item appears multiple times, keep the entry with the most complete information (include source_page).
-4. Prefer quality over quantity - complete entries over duplicate partial entries.
-5. Always include source_file and source_page when available."""
+2. GROUNDING: Extract ONLY information explicitly stated in the provided context.
+3. Extract each unique clinical entity ONCE per date.
+4. If the same item appears multiple times, keep the entry with the most complete information (include source_page).
+5. Prefer quality over quantity - accurate, grounded entries only.
+6. Always include source_file and source_page when available.
+7. CRITICAL: If information is not in the context, DO NOT fabricate or infer - omit the field or return null.
+8. When dates are given as ranges, report the range - do not create specific dates.
+9. When values are given as ranges (e.g., "glucose 180-280"), report the range - do not invent specific values."""
 
 
 def extract_json_from_response(response: str) -> dict:

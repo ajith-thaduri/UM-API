@@ -53,21 +53,37 @@ def shift_dates_in_text(text: str, shift_days: int, direction: int) -> str:
     if not text or shift_days == 0:
         return text
     result = text
-    seen = set()
+    
+    # Identify all date matches first with their spans
+    matches = []
     for pattern, _ in DATE_PATTERNS:
         for m in pattern.finditer(result):
             span = m.span()
-            candidate = result[span[0] : span[1]]
-            if candidate in seen:
-                continue
-            normalized = normalize_date_format(candidate)
-            if normalized:
-                shifted = _shift_date_str(normalized, shift_days, direction)
-                if shifted != candidate:
-                    result = result[: span[0]] + shifted + result[span[1] :]
-                    seen.add(candidate)
-                    # Only replace first occurrence per candidate to avoid double-replace
-                    break
+            matches.append({
+                "start": span[0],
+                "end": span[1],
+                "text": result[span[0]:span[1]]
+            })
+            
+    # Sort matches by start index descending to handle replacement from end
+    matches.sort(key=lambda x: x["start"], reverse=True)
+    
+    last_start = float('inf')
+    
+    for m in matches:
+        # Avoid processing overlapping matches
+        # Since we are iterating backwards, the current match's end must be <= the previous match's start
+        if m["end"] > last_start:
+            continue
+            
+        candidate = m["text"]
+        normalized = normalize_date_format(candidate)
+        if normalized:
+            shifted = _shift_date_str(normalized, shift_days, direction)
+            if shifted and shifted != candidate:
+                result = result[:m["start"]] + shifted + result[m["end"]:]
+                last_start = m["start"]
+                
     return result
 
 

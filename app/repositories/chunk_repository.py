@@ -84,6 +84,12 @@ class ChunkRepository(BaseRepository[DocumentChunk]):
         ).delete()
         db.commit()
         return count
+    
+    def count_by_case(self, db: Session, case_id: str) -> int:
+        """Count total chunks for a case"""
+        return db.query(DocumentChunk).filter(
+            DocumentChunk.case_id == case_id
+        ).count()
 
     def delete_by_file_id(self, db: Session, file_id: str) -> int:
         """Delete all chunks for a file"""

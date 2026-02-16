@@ -397,6 +397,26 @@ class CaseProcessor:
                     clinical_data = extraction_result.data
                     extraction_sources = extraction_result.sources
                     
+                    # Flag low-confidence extractions
+                    low_confidence_items = []
+                    confidence_threshold = 0.5  # Configurable
+                    
+                    for data_type in ["medications", "labs", "diagnoses", "procedures", "vitals", "allergies", "imaging"]:
+                        items = clinical_data.get(data_type, [])
+                        for idx, item in enumerate(items):
+                            if item.get('confidence_score', 1.0) < confidence_threshold:
+                                low_confidence_items.append({
+                                    'type': data_type,
+                                    'index': idx,
+                                    'item': item.get('name') or item.get('test_name') or item.get('allergen') or str(item),
+                                    'confidence': item.get('confidence_score', 0.0)
+                                })
+                    
+                    if low_confidence_items:
+                        logger.warning(f"[VALIDATION] Case {case_id} has {len(low_confidence_items)} low-confidence items")
+                        for lc_item in low_confidence_items[:10]:  # Log first 10
+                            logger.warning(f"  - {lc_item['type']}: {lc_item['item']} (confidence: {lc_item['confidence']:.2f})")
+                    
                     # CRITICAL: Merge sources into extracted_data items
                     merge_start = time.time()
                     clinical_data = self._merge_sources_into_data(

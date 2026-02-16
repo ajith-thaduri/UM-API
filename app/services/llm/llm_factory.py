@@ -62,6 +62,23 @@ def get_tier2_llm_service() -> BaseLLMService:
     return ClaudeService()
 
 
+def get_tier2_llm_service_for_user(db: Session, user_id: str) -> BaseLLMService:
+    """Tier 2 (summary only) respecting user preference for Claude model."""
+    try:
+        from app.repositories.user_preference_repository import UserPreferenceRepository
+        preference_repo = UserPreferenceRepository()
+        preference = preference_repo.get_by_user_id(db, user_id)
+        
+        service = ClaudeService()
+        if preference and preference.tier2_model:
+            service.model = preference.tier2_model
+            logger.debug(f"Using user preference Tier 2 model: {service.model} for user {user_id}")
+        return service
+    except Exception as e:
+        logger.warning(f"Error loading Tier 2 preference for user {user_id}: {e}, falling back to default")
+        return get_tier2_llm_service()
+
+
 def get_tier1_llm_service(provider: Optional[str] = None, model: Optional[str] = None) -> BaseLLMService:
     """
     Tier 1 (timeline, clinical extraction, contradictions, red flags, upload agent): OSS/OpenRouter.
@@ -83,15 +100,27 @@ def get_tier1_llm_service_for_user(
     provider: Optional[str] = None,
     model: Optional[str] = None
 ) -> BaseLLMService:
-    """Tier 1 LLM respecting user preferences when not using OpenRouter."""
-    t1 = (provider or getattr(settings, "TIER1_LLM_PROVIDER", None) or "").strip().lower()
-    if t1 == "openrouter":
-        try:
-            from app.services.llm.openrouter_service import OpenRouterService
-            return OpenRouterService()
-        except Exception as e:
-            logger.warning("OpenRouter not available: %s. Falling back to user preference.", e)
-    return get_llm_service_for_user(db, user_id, provider, model)
+    """Tier 1 LLM respecting user preferences for OpenRouter model."""
+    # User request: Tier 1 always OpenRouter, but model from Preference
+    try:
+        from app.repositories.user_preference_repository import UserPreferenceRepository
+        preference_repo = UserPreferenceRepository()
+        preference = preference_repo.get_by_user_id(db, user_id)
+        
+        from app.services.llm.openrouter_service import OpenRouterService
+        service = OpenRouterService()
+        
+        # Priority: explicit model param > user preference > global settings
+        if model:
+            service.model = model
+        elif preference and preference.tier1_model:
+            service.model = preference.tier1_model
+            logger.debug(f"Using user preference Tier 1 model: {service.model} for user {user_id}")
+            
+        return service
+    except Exception as e:
+        logger.warning("Error getting Tier 1 OpenRouter service for user %s: %s. Falling back to default.", user_id, e)
+        return get_tier1_llm_service(provider, model)
 
 
 def get_llm_service_for_user(

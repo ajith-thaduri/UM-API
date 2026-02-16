@@ -20,6 +20,7 @@ from app.services.prompt_service import prompt_service
 from app.services.date_shift_service import date_shift_service  # Legacy date shift (for backward compat)
 from app.services.presidio_deidentification_service import presidio_deidentification_service
 from app.services.phi_validator import PHILeakageError
+from app.repositories.user_preference_repository import UserPreferenceRepository
 from app.utils.safe_logger import get_safe_logger
 
 logger = logging.getLogger(__name__)
@@ -30,11 +31,13 @@ class SummaryService:
     """Service for generating UM-ready summaries using structured data only"""
 
     def __init__(self):
-        # Don't cache - get fresh service each time to pick up config changes
-        pass
+        self._pref_repo = UserPreferenceRepository()
     
-    def _get_tier2_llm_service(self):
+    def _get_tier2_llm_service(self, db: Optional[Session] = None, user_id: Optional[str] = None):
         """Tier 2: always Claude for summary. Use with de-identified + date-shifted payloads only."""
+        if db and user_id:
+            from app.services.llm.llm_factory import get_tier2_llm_service_for_user
+            return get_tier2_llm_service_for_user(db, user_id)
         return get_tier2_llm_service()
 
     def _get_llm_service(self, db: Optional[Session] = None, user_id: Optional[str] = None):
@@ -86,6 +89,8 @@ class SummaryService:
         return {
             "patient_name": patient_name,
             "case_number": case_number,
+            "admission_date": extracted_data.get("admission_date", "Not documented in extraction"),
+            "discharge_date": extracted_data.get("discharge_date", "Not documented in extraction"),
             "diagnoses_str": diagnoses_str,
             "meds_text": meds_text,
             "allergies_text": self._format_allergies_for_prompt(extracted_data.get("allergies", [])),
@@ -141,33 +146,53 @@ class SummaryService:
         safe_logger.info(f"Summary Generation Config: Two-Tier={enable_two_tier}, DB={db is not None}, CaseID={case_id}, UserID={user_id}")
         
         if enable_two_tier and db and case_id and user_id:
+            # Check user preference for Presidio
+            prefs = self._pref_repo.get_by_user_id(db, user_id)
+            presidio_enabled = prefs.presidio_enabled if prefs else True
+            
             # ============================================================
             # TIER 2 PATH (v2.0): De-identification → Claude → Re-identification
             # ============================================================
             try:
-                safe_logger.info(f"Using Tier 2 de-identification for case {case_id}")
-                
-                # Step 1: De-identify data using PresidioDeIdentificationService
-                de_id_payload, vault_id = presidio_deidentification_service.de_identify_for_summary(
-                    db=db,
-                    case_id=case_id,
-                    user_id=user_id,
-                    patient_name=patient_name,
-                    timeline=timeline,
-                    clinical_data=extracted_data,
-                    red_flags=contradictions,
-                    case_metadata={"case_number": case_number},
-                )
+                if not presidio_enabled:
+                    safe_logger.info(f"Presidio is DISABLED for user {user_id}. Sending RAW data to Claude.")
+                    # Pass original data directly
+                    de_id_payload = {
+                        "clinical_data": extracted_data,
+                        "timeline": timeline,
+                        "red_flags": contradictions
+                    }
+                    vault_id = None
+                    patient_token = patient_name
+                    case_no_token = str(case_number)
+                else:
+                    safe_logger.info(f"Using Tier 2 de-identification for case {case_id}")
+                    
+                    # Step 1: De-identify data using PresidioDeIdentificationService
+                    de_id_payload, vault_id, token_map = presidio_deidentification_service.de_identify_for_summary(
+                        db=db,
+                        case_id=case_id,
+                        user_id=user_id,
+                        patient_name=patient_name,
+                        timeline=timeline,
+                        clinical_data=extracted_data,
+                        red_flags=contradictions,
+                        case_metadata={"case_number": case_number},
+                    )
+                    
+                    # Find actual tokens for patient and case number
+                    patient_token = next((t for t, v in token_map.items() if v == patient_name), "[[PERSON-01]]")
+                    case_no_token = next((t for t, v in token_map.items() if v == str(case_number)), "[[ID-01]]")
                 
                 # Step 2: Build prompt with de-identified data
                 variables = self._build_tier2_variables_from_payload(
                     de_id_payload,
-                    patient_token="[[PERSON::de-identified]]",  # Generic patient reference
-                    case_number_token="[[ID::de-identified]]",
+                    patient_token=patient_token,
+                    case_number_token=case_no_token,
                 )
                 
                 # Step 3: Call Claude (Tier 2 LLM)
-                llm_service = self._get_tier2_llm_service()
+                llm_service = self._get_tier2_llm_service(db, user_id)
                 if not llm_service.is_available():
                     safe_logger.warning("Claude not available, falling back to template")
                     return self._generate_mock_summary(
@@ -183,6 +208,7 @@ class SummaryService:
                     raise ValueError(f"System message not found for prompt_id: {prompt_id}")
                 
                 from app.services.llm_utils import EXTRACTION_RULES
+                prompt += f"\n\nIMPORTANT: Represent the patient as {patient_token} and the case number as {case_no_token} throughout the summary. These tokens will be automatically restored to original values."
                 prompt += "\n\nPROVIDER-SPECIFIC GUIDANCE: Aim for 2500-3500 tokens total. Be comprehensive but concise."
                 prompt_with_rules = prompt + EXTRACTION_RULES
                 
@@ -242,19 +268,12 @@ class SummaryService:
             # ============================================================
             # LEGACY PATH: Basic date shift (backward compatibility)
             # ============================================================
-            use_legacy_tier2 = getattr(settings, "TIER2_SUMMARY_DEIDENTIFY", True) and db and case_id
-            if use_legacy_tier2:
-                llm_service = self._get_tier2_llm_service()
-                shift_days = date_shift_service.get_or_create_shift_days(db, case_id)
-                variables = date_shift_service.prepare_tier2_variables(
-                    extracted_data, timeline, contradictions, shift_days
-                )
-            else:
-                llm_service = self._get_llm_service(db, user_id)
-                shift_days = 0
-                variables = self._build_legacy_summary_variables(
-                    extracted_data, timeline, contradictions, patient_name, case_number
-                )
+            # Force Tier 2 for all summaries as per user requirement.
+            llm_service = self._get_tier2_llm_service(db, user_id)
+            shift_days = date_shift_service.get_or_create_shift_days(db, case_id)
+            variables = date_shift_service.prepare_tier2_variables(
+                extracted_data, timeline, contradictions, shift_days
+            )
 
             if not llm_service.is_available():
                 return self._generate_mock_summary(
@@ -339,6 +358,122 @@ class SummaryService:
         Returns:
             Executive summary as 5-10 bullet points
         """
+        # Check if two-tier architecture is enabled
+        enable_two_tier = getattr(settings, "ENABLE_TWO_TIER_ARCHITECTURE", False)
+        
+        if enable_two_tier and db and case_id and user_id:
+            # Check user preference for Presidio
+            prefs = self._pref_repo.get_by_user_id(db, user_id)
+            presidio_enabled = prefs.presidio_enabled if prefs else True
+            
+            try:
+                if not presidio_enabled:
+                    safe_logger.info(f"Presidio is DISABLED for user {user_id}. Sending RAW data to Claude for executive summary.")
+                    # Pass original data directly
+                    de_id_payload = {
+                        "clinical_data": extracted_data,
+                        "timeline": timeline,
+                        "red_flags": contradictions
+                    }
+                    vault_id = None
+                    patient_token = patient_name
+                    case_no_token = str(case_number)
+                else:
+                    safe_logger.info(f"Using Tier 2 de-identification for executive summary of case {case_id}")
+                    
+                    # Step 1: De-identify data
+                    de_id_payload, vault_id, token_map = presidio_deidentification_service.de_identify_for_summary(
+                        db=db,
+                        case_id=case_id,
+                        user_id=user_id,
+                        patient_name=patient_name,
+                        timeline=timeline,
+                        clinical_data=extracted_data,
+                        red_flags=contradictions,
+                        case_metadata={"case_number": case_number},
+                    )
+                    
+                    # Find actual tokens for patient and case number
+                    patient_token = next((t for t, v in token_map.items() if v == patient_name), "[[PERSON-01]]")
+                    case_no_token = next((t for t, v in token_map.items() if v == str(case_number)), "[[ID-01]]")
+                
+                # Step 2: Extract key data from DE-IDENTIFIED payload
+                de_id_key_data = self._extract_key_data_for_executive(
+                    de_id_payload["clinical_data"], 
+                    de_id_payload["timeline"], 
+                    de_id_payload["red_flags"]
+                )
+                
+                # Step 3: Call Claude (Tier 2 LLM)
+                llm_service = self._get_tier2_llm_service(db, user_id)
+                if not llm_service.is_available():
+                    return self._generate_mock_executive_summary(
+                        extracted_data, timeline, contradictions, patient_name, case_number
+                    )
+                
+                prompt_id = "executive_summary_generation"
+                variables = {
+                    "patient_name": patient_token,
+                    "case_number": case_no_token,
+                    "admission_discharge_info": de_id_key_data['admission_discharge_info'],
+                    "primary_diagnoses": de_id_key_data['primary_diagnoses'],
+                    "key_medications": de_id_key_data['key_medications'],
+                    "critical_labs": de_id_key_data['critical_labs'],
+                    "key_events": de_id_key_data['key_events'],
+                    "concerns": de_id_key_data['concerns']
+                }
+                
+                prompt = prompt_service.render_prompt(prompt_id, variables)
+                system_message = prompt_service.get_system_message(prompt_id)
+                
+                if not system_message:
+                    raise ValueError(f"System message not found for prompt_id: {prompt_id}")
+                
+                # For executive summary, add instruction to return narrative but stick to tokens
+                prompt += f"\n\nIMPORTANT: Use the {patient_token} and {case_no_token} tokens exactly as provided. Do not use generic placeholders."
+                
+                response, usage = await llm_service.chat_completion(
+                    messages=[{"role": "user", "content": prompt}],
+                    system_message=system_message,
+                    temperature=0.1,
+                    max_tokens=2000,
+                )
+                
+                # Step 4: Re-identify the response
+                final_summary = presidio_deidentification_service.re_identify_summary(
+                    db=db,
+                    vault_id=vault_id,
+                    summary_text=response,
+                )
+                
+                # Track usage
+                if user_id and db:
+                    try:
+                        from app.services.usage_tracking_service import usage_tracking_service
+                        usage_tracking_service.track_llm_usage(
+                            db=db,
+                            user_id=user_id,
+                            provider="claude",
+                            model=getattr(llm_service, "model", settings.CLAUDE_MODEL),
+                            operation_type="summary",
+                            prompt_tokens=usage.get("prompt_tokens", 0),
+                            completion_tokens=usage.get("completion_tokens", 0),
+                            total_tokens=usage.get("total_tokens", 0),
+                            case_id=case_id,
+                            extra_metadata={"operation": "executive_summary_tier2", "prompt_id": prompt_id, "vault_id": vault_id},
+                        )
+                    except Exception as e:
+                        logger.warning("Failed to track usage: %s", e)
+                
+                return final_summary
+                
+            except Exception as e:
+                safe_logger.error(f"Executive summary Tier 2 failed for case {case_id}: {e}", exc_info=True)
+                return self._generate_mock_executive_summary(
+                    extracted_data, timeline, contradictions, patient_name, case_number
+                )
+        
+        # Fallback to legacy path (Tier 1) only if two-tier is DISABLED
         llm_service = self._get_llm_service(db, user_id)
         
         if not llm_service.is_available():
@@ -441,12 +576,18 @@ class SummaryService:
     ) -> Dict:
         """Extract key data points for executive summary"""
         
-        # Admission/discharge info from timeline
-        admission_events = [e for e in timeline if 'admission' in e.get('description', '').lower() or e.get('event_type', '').lower() == 'admission']
-        discharge_events = [e for e in timeline if 'discharge' in e.get('description', '').lower() or e.get('event_type', '').lower() == 'discharge']
+        # Admission/discharge info from extracted_data FIRST (from critical scan), timeline as fallback
+        admission_date = extracted_data.get('admission_date')
+        discharge_date = extracted_data.get('discharge_date')
         
-        admission_date = admission_events[0].get('date', 'Unknown') if admission_events else 'Not documented'
-        discharge_date = discharge_events[0].get('date', 'Unknown') if discharge_events else 'Not documented'
+        # Fallback to timeline if not in extracted_data
+        if not admission_date:
+            admission_events = [e for e in timeline if 'admission' in e.get('description', '').lower() or e.get('event_type', '').lower() == 'admission']
+            admission_date = admission_events[0].get('date', 'Unknown') if admission_events else 'Not documented'
+        
+        if not discharge_date:
+            discharge_events = [e for e in timeline if 'discharge' in e.get('description', '').lower() or e.get('event_type', '').lower() == 'discharge']
+            discharge_date = discharge_events[0].get('date', 'Unknown') if discharge_events else 'Not documented'
         
         admission_discharge_info = f"Admission: {admission_date}, Discharge: {discharge_date}"
         
@@ -638,15 +779,48 @@ class SummaryService:
                 vitals_summary.append(f"- {vital['type']}: {vital['value']} {vital.get('unit', '')} (Date: {date})" if date else f"- {vital['type']}: {vital['value']} {vital.get('unit', '')}")
         vitals_text = "\n".join(vitals_summary) if vitals_summary else "Not explicitly documented"
         
+        # Imaging
+        imaging = clinical_data.get("imaging", [])
+        imaging_summary = [f"- {i.get('study_type', 'Unknown')}: {i.get('findings', '')} (Date: {i.get('date', '')})" for i in imaging]
+        imaging_text = "\n".join(imaging_summary) if imaging_summary else "Not explicitly documented"
+        
+        # History & Complaint
+        chief_complaint = clinical_data.get("chief_complaint", "Not explicitly documented")
+        history = clinical_data.get("history", [])
+        history_summary = [f"- {h.get('description', h) if isinstance(h, dict) else h}" for h in history]
+        history_text = "\n".join(history_summary) if history_summary else "Not explicitly documented"
+        
+        # Social Factors
+        social_factors = clinical_data.get("social_factors", [])
+        social_summary = [f"- {s.get('description', s) if isinstance(s, dict) else s}" for s in social_factors]
+        social_text = "\n".join(social_summary) if social_summary else "Not explicitly documented"
+        
+        # Therapy & Functional Status
+        therapy_notes = clinical_data.get("therapy_notes", [])
+        therapy_summary = [f"- {t.get('description', t) if isinstance(t, dict) else t}" for t in therapy_notes]
+        therapy_text = "\n".join(therapy_summary) if therapy_summary else "Not explicitly documented"
+        
+        functional_status = clinical_data.get("functional_status", [])
+        functional_summary = [f"- {f.get('description', f) if isinstance(f, dict) else f}" for f in functional_status]
+        functional_text = "\n".join(functional_summary) if functional_summary else "Not explicitly documented"
+        
         return {
             "patient_name": patient_token,
             "case_number": case_number_token,
+            "admission_date": clinical_data.get("admission_date", "Not documented in extraction"),
+            "discharge_date": clinical_data.get("discharge_date", "Not documented in extraction"),
             "diagnoses_str": diagnoses_str,
             "meds_text": meds_text,
             "allergies_text": self._format_allergies_for_prompt(clinical_data.get("allergies", [])),
             "procedures_text": procedures_text,
             "labs_text": labs_text,
             "vitals_text": vitals_text,
+            "imaging_text": imaging_text,
+            "chief_complaint": chief_complaint,
+            "history_text": history_text,
+            "social_text": social_text,
+            "therapy_text": therapy_text,
+            "functional_text": functional_text,
             "timeline_text": self._format_timeline_for_prompt(timeline),
             "contradictions_text": self._format_contradictions_for_prompt(red_flags),
             "diagnoses_count": len(diagnoses),
@@ -655,6 +829,7 @@ class SummaryService:
             "labs_total_count": len(labs),
             "labs_abnormal_count": len(abnormal_labs),
             "timeline_count": len(timeline),
+            "imaging_count": len(imaging),
         }
 
     def _generate_mock_summary(

@@ -1,7 +1,7 @@
 """User preference model for LLM settings"""
 
 from datetime import datetime, timezone
-from sqlalchemy import Column, String, DateTime, ForeignKey, UniqueConstraint
+from sqlalchemy import Column, String, DateTime, ForeignKey, UniqueConstraint, Boolean
 from sqlalchemy.orm import relationship
 
 from app.db.session import Base
@@ -18,6 +18,9 @@ class UserPreference(Base):
     # LLM preferences
     llm_provider = Column(String, nullable=False)  # "openai" or "claude"
     llm_model = Column(String, nullable=False)  # Model name (e.g., "gpt-4o", "claude-sonnet-4-5-20250929")
+    tier1_model = Column(String, nullable=True) # OpenRouter model name
+    tier2_model = Column(String, nullable=True) # Claude model name
+    presidio_enabled = Column(Boolean, default=True, nullable=False)
     
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)

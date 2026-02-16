@@ -35,8 +35,14 @@ def normalize_date_format(date_str: str) -> Optional[str]:
         "%b %d, %Y",     # Jan 15, 2024
         "%d %B %Y",      # 15 January 2024
         "%d %b %Y",      # 15 Jan 2024
+        "%B %d %Y",      # January 15 2024 (no comma)
+        "%b %d %Y",      # Jan 15 2024
+        "%d %B %Y",      # 15 January 2024
+        "%d %b %Y",      # 15 Jan 2024
         "%m/%d/%y",      # 01/15/24
         "%Y/%m/%d",      # 2024/01/15
+        "%d-%m-%Y",      # 15-01-2024 (EU)
+        "%Y.%m.%d",      # 2024.01.15
     ]
     
     for fmt in formats:
@@ -97,6 +103,8 @@ def parse_date_for_sort(date_str: Optional[str]) -> datetime:
         "%Y-%m-%d",
         "%B %d, %Y",
         "%b %d, %Y",
+        "%d %B %Y",
+        "%d %b %Y",
     ]
     
     for fmt in formats:

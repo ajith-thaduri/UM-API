@@ -606,7 +606,9 @@ class TimelineService:
         if admission_date:
             normalized_date = self._normalize_date_format(str(admission_date))
             if normalized_date:
-                events.append({
+                # Check for source from critical scan
+                admission_source = extracted_data.get("admission_date_source", {})
+                event = {
                     "id": str(uuid.uuid4()),
                     "date": normalized_date,
                     "event_type": "admission",
@@ -614,14 +616,21 @@ class TimelineService:
                     "source": "clinical_data",
                     "details": {"admission_date": normalized_date},
                     "source_file": extracted_data.get("source_file"),
-                    "source_page": extracted_data.get("source_page")
-                })
+                    "source_page": extracted_data.get("source_page") or admission_source.get("page_number")
+                }
+                # Mark if from critical scan to preserve through filtering
+                if admission_source.get("from_critical_scan"):
+                    event["from_critical_scan"] = True
+                    event["source_page"] = admission_source.get("page_number")
+                events.append(event)
         
         # Extract discharge event
         if discharge_date:
             normalized_date = self._normalize_date_format(str(discharge_date))
             if normalized_date:
-                events.append({
+                # Check for source from critical scan
+                discharge_source = extracted_data.get("discharge_date_source", {})
+                event = {
                     "id": str(uuid.uuid4()),
                     "date": normalized_date,
                     "event_type": "discharge",
@@ -629,8 +638,13 @@ class TimelineService:
                     "source": "clinical_data",
                     "details": {"discharge_date": normalized_date},
                     "source_file": extracted_data.get("source_file"),
-                    "source_page": extracted_data.get("source_page")
-                })
+                    "source_page": extracted_data.get("source_page") or discharge_source.get("page_number")
+                }
+                # Mark if from critical scan to preserve through filtering
+                if discharge_source.get("from_critical_scan"):
+                    event["from_critical_scan"] = True
+                    event["source_page"] = discharge_source.get("page_number")
+                events.append(event)
         
         # Extract encounter/visit event if different from admission
         if encounter_date and encounter_date != admission_date and encounter_date != discharge_date:
@@ -1582,16 +1596,24 @@ class TimelineService:
         Filter out events that don't have both source_file and source_page.
         This is CRITICAL for audit defense - every timeline event MUST have source references.
         
+        EXCEPTION: Events marked with from_critical_scan=True (admission/discharge from regex scan)
+        are preserved even without full source references, as they are system-critical.
+        
         Args:
             events: List of timeline events
             
         Returns:
-            List of events that have both source_file and source_page
+            List of events that have both source_file and source_page (or are from critical scan)
         """
         filtered = []
         filtered_count = 0
         
         for event in events:
+            # Preserve critical admission/discharge events from full-document scan
+            if event.get("from_critical_scan"):
+                filtered.append(event)
+                continue
+            
             # Check for source_file (can be at event level or in details)
             source_file = event.get("source_file")
             if not source_file and isinstance(event.get("details"), dict):

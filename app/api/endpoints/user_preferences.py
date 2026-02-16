@@ -2,12 +2,13 @@
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from pydantic import BaseModel
 
 from app.db.session import get_db
-from app.db.dependencies import get_user_preference_repository
+from app.db.dependencies import get_user_preference_repository, get_llm_model_repository
 from app.repositories.user_preference_repository import UserPreferenceRepository
+from app.repositories.llm_model_repository import LLMModelRepository
 from app.api.endpoints.auth import get_current_user
 from app.models.user import User
 from app.core.config import settings
@@ -16,13 +17,25 @@ router = APIRouter()
 
 
 class UserPreferenceRequest(BaseModel):
-    llm_provider: str  # "openai" or "claude"
-    llm_model: str  # Model name
+    # Tier 1 Config (OSS / OpenRouter)
+    tier1_model: str 
+    
+    # Privacy
+    presidio_enabled: Optional[bool] = True
+
+    # Legacy fields (kept for backward compatibility but enforced by backend)
+    # The frontend might still send these, but backend will override
+    llm_provider: Optional[str] = "openrouter" 
+    llm_model: Optional[str] = "claude-sonnet-4-5-20250929"
+    tier2_model: Optional[str] = "claude-sonnet-4-5-20250929"
 
 
 class UserPreferenceResponse(BaseModel):
     llm_provider: str
     llm_model: str
+    tier1_model: Optional[str]
+    tier2_model: Optional[str]
+    presidio_enabled: bool
     created_at: str
     updated_at: str
 
@@ -46,6 +59,9 @@ async def get_user_preferences(
         return {
             "llm_provider": settings.LLM_PROVIDER.lower(),
             "llm_model": settings.OPENAI_MODEL if settings.LLM_PROVIDER.lower() == "openai" else settings.CLAUDE_MODEL,
+            "tier1_model": getattr(settings, "TIER1_OPENROUTER_MODEL", "meta-llama/llama-3.1-70b-instruct"),
+            "tier2_model": settings.CLAUDE_MODEL,
+            "presidio_enabled": True,
             "created_at": "",
             "updated_at": ""
         }
@@ -53,6 +69,9 @@ async def get_user_preferences(
     return {
         "llm_provider": preference.llm_provider,
         "llm_model": preference.llm_model,
+        "tier1_model": preference.tier1_model,
+        "tier2_model": preference.tier2_model,
+        "presidio_enabled": preference.presidio_enabled,
         "created_at": preference.created_at.isoformat(),
         "updated_at": preference.updated_at.isoformat()
     }
@@ -64,96 +83,72 @@ async def update_user_preferences(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
     preference_repository: UserPreferenceRepository = Depends(get_user_preference_repository),
+    model_repository: LLMModelRepository = Depends(get_llm_model_repository),
 ):
     """Update user's LLM preferences"""
-    # Validate provider
-    if request.llm_provider.lower() not in ["openai", "claude"]:
-        raise HTTPException(status_code=400, detail="Invalid provider. Must be 'openai' or 'claude'")
     
-    # Validate model (basic check - could be enhanced)
-    if not request.llm_model or len(request.llm_model.strip()) == 0:
-        raise HTTPException(status_code=400, detail="Model name is required")
+    # 1. Enforce Tier 2 Lock (The Vault)
+    # Regardless of what user requested, Tier 2 is compliance-locked to Claude
+    tier2_model_locked = "claude-sonnet-4-5-20250929"
     
+    # 2. Validate Tier 1 Model (The Engine)
+    # Check if model exists in our DB or needs to be added (custom)
+    accepted_tier1 = request.tier1_model
+    existing_model = model_repository.get_by_model_id(db, accepted_tier1)
+    
+    if not existing_model and accepted_tier1:
+        # If it's a custom model string entered by user, we register it as custom
+        # In a real prod environment, you might want to ping OpenRouter API to validate it valid first
+        model_repository.create(
+            db=db,
+            model_id=accepted_tier1,
+            display_name=accepted_tier1, # Use ID as name for custom
+            provider="openrouter",
+            is_custom=True
+        )
+
     # Update or create preference
     preference = preference_repository.upsert(
         db=db,
         user_id=current_user.id,
-        llm_provider=request.llm_provider.lower(),
-        llm_model=request.llm_model
+        llm_provider="openrouter", # Logical provider for user operations
+        llm_model=tier2_model_locked, # Default model logic
+        presidio_enabled=request.presidio_enabled if request.presidio_enabled is not None else True,
+        tier1_model=accepted_tier1,
+        tier2_model=tier2_model_locked
     )
     
     return {
         "llm_provider": preference.llm_provider,
         "llm_model": preference.llm_model,
+        "tier1_model": preference.tier1_model,
+        "tier2_model": preference.tier2_model,
+        "presidio_enabled": preference.presidio_enabled,
         "created_at": preference.created_at.isoformat(),
         "updated_at": preference.updated_at.isoformat()
     }
 
 
-@router.get("/user/preferences/models", response_model=AvailableModelsResponse)
-async def get_available_models(
-    provider: str,
+@router.get("/llm/tier1-options", response_model=AvailableModelsResponse)
+async def get_tier1_options(
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    model_repository: LLMModelRepository = Depends(get_llm_model_repository),
 ):
-    """Get available models for a provider"""
-    provider_lower = provider.lower()
+    """Get active Tier 1 (OpenRouter) models from database"""
+    models = model_repository.get_all_active(db, provider="openrouter")
     
-    if provider_lower == "openai":
-        models = [
-            {
-                "name": "gpt-4o",
-                "display_name": "GPT-4o",
-                "description": "Latest GPT-4 optimized model - best quality and speed"
-            },
-            {
-                "name": "gpt-4o-mini",
-                "display_name": "GPT-4o Mini",
-                "description": "Faster and more cost-effective GPT-4 variant"
-            },
-            {
-                "name": "gpt-4-turbo",
-                "display_name": "GPT-4 Turbo",
-                "description": "Previous generation GPT-4 with extended context"
-            },
-            {
-                "name": "gpt-3.5-turbo",
-                "display_name": "GPT-3.5 Turbo",
-                "description": "Fast and cost-effective for simpler tasks"
-            }
-        ]
-    elif provider_lower == "claude":
-        models = [
-            {
-                "name": "claude-sonnet-4-5-20250929",
-                "display_name": "Claude Sonnet 4.5",
-                "description": "Latest Sonnet 4.5 - highest quality, recommended"
-            },
-            {
-                "name": "claude-sonnet-4-5",
-                "display_name": "Claude Sonnet 4.5 (latest)",
-                "description": "Latest Sonnet 4.5 without date suffix"
-            },
-            {
-                "name": "claude-haiku-4-5",
-                "display_name": "Claude Haiku 4.5",
-                "description": "Fast and cost-effective Haiku model"
-            },
-            {
-                "name": "claude-3-5-haiku-20241022",
-                "display_name": "Claude 3.5 Haiku",
-                "description": "Previous generation Haiku model"
-            },
-            {
-                "name": "claude-3-haiku-20240307",
-                "display_name": "Claude 3 Haiku",
-                "description": "Older Haiku model"
-            }
-        ]
-    else:
-        raise HTTPException(status_code=400, detail="Invalid provider. Must be 'openai' or 'claude'")
+    model_list = [
+        {
+            "name": m.model_id,
+            "display_name": m.display_name,
+            "description": m.description,
+            "is_custom": m.is_custom
+        } for m in models
+    ]
     
     return {
-        "provider": provider_lower,
-        "models": models
+        "provider": "openrouter",
+        "models": model_list
     }
 
