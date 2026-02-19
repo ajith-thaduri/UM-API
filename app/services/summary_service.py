@@ -79,24 +79,40 @@ class SummaryService:
                 date = proc.get("date", "") if isinstance(proc, dict) else ""
                 procedures_summary.append(f"- {name} (Date: {date})" if date else f"- {name}")
         procedures_text = "\n".join(procedures_summary) if procedures_summary else "Not explicitly documented"
-        vitals = extracted_data.get("vitals", [])[:10]
+        vitals = extracted_data.get("vitals", [])
         vitals_summary = []
         for vital in vitals:
             if isinstance(vital, dict) and vital.get("type") and vital.get("value"):
                 date = vital.get("date", "")
                 vitals_summary.append(f"- {vital['type']}: {vital['value']} {vital.get('unit', '')} (Date: {date})" if date else f"- {vital['type']}: {vital['value']} {vital.get('unit', '')}")
         vitals_text = "\n".join(vitals_summary) if vitals_summary else "Not explicitly documented"
+    
+        # Narrative fields for legacy path
+        chief_complaint = extracted_data.get("chief_complaint", "Not explicitly documented")
+        history_text = extracted_data.get("history_of_present_illness", "Not explicitly documented")
+        social_text = extracted_data.get("social_history", "Not explicitly documented")
+        therapy_text = extracted_data.get("therapy_notes", "Not explicitly documented")
+        functional_text = extracted_data.get("functional_status", "Not explicitly documented")
+        imaging_text = extracted_data.get("imaging", "Not explicitly documented")
+    
         return {
             "patient_name": patient_name,
             "case_number": case_number,
             "admission_date": extracted_data.get("admission_date", "Not documented in extraction"),
             "discharge_date": extracted_data.get("discharge_date", "Not documented in extraction"),
+            "stated_los": extracted_data.get("length_of_stay", "Not explicitly documented"),
             "diagnoses_str": diagnoses_str,
             "meds_text": meds_text,
             "allergies_text": self._format_allergies_for_prompt(extracted_data.get("allergies", [])),
             "procedures_text": procedures_text,
             "labs_text": labs_text,
             "vitals_text": vitals_text,
+            "imaging_text": imaging_text,
+            "chief_complaint": chief_complaint,
+            "history_text": history_text,
+            "social_text": social_text,
+            "therapy_text": therapy_text,
+            "functional_text": functional_text,
             "timeline_text": self._format_timeline_for_prompt(timeline),
             "contradictions_text": self._format_contradictions_for_prompt(contradictions),
             "diagnoses_count": len(diagnoses),
@@ -302,9 +318,8 @@ class SummaryService:
 
             try:
                 from app.services.llm.claude_service import ClaudeService
-                from app.services.llm_utils import EXTRACTION_RULES
-                prompt += "\n\nPROVIDER-SPECIFIC GUIDANCE: Aim for 2500-3500 tokens total. Be comprehensive but concise."
-                prompt_with_rules = prompt + EXTRACTION_RULES
+                prompt += "\n\nPROVIDER-SPECIFIC GUIDANCE: Aim for 2500-3500 tokens total. Be comprehensive but concise. OUTPUT ONLY HUMAN-READABLE MARKDOWN. DO NOT USE JSON."
+                prompt_with_rules = prompt # Removed EXTRACTION_RULES which forced JSON
 
                 response, usage = await llm_service.chat_completion(
                     messages=[{"role": "user", "content": prompt_with_rules}],
@@ -619,10 +634,10 @@ class SummaryService:
         
         admission_discharge_info = f"Admission: {admission_date}, Discharge: {discharge_date}"
         
-        # Primary diagnoses (top 3)
+        # Primary diagnoses
         diagnoses = extracted_data.get('diagnoses', [])
         primary_diagnoses_list = []
-        for dx in diagnoses[:3]:
+        for dx in diagnoses:
             if isinstance(dx, str):
                 primary_diagnoses_list.append(dx)
             elif isinstance(dx, dict):
@@ -631,19 +646,19 @@ class SummaryService:
                     primary_diagnoses_list.append(name)
         primary_diagnoses = ', '.join(primary_diagnoses_list) if primary_diagnoses_list else 'Not documented'
         
-        # Key medications (top 5)
+        # Key medications
         meds = extracted_data.get('medications', [])
         key_meds_list = []
-        for med in meds[:5]:
+        for med in meds:
             name = med.get('name', '')
             if name:
                 dosage = med.get('dosage', '')
                 key_meds_list.append(f"{name} {dosage}".strip())
         key_medications = ', '.join(key_meds_list) if key_meds_list else 'Not documented'
         
-        # Critical lab findings (abnormals only, top 5)
+        # Critical lab findings (abnormals only)
         labs = extracted_data.get('labs', [])
-        abnormal_labs = [lab for lab in labs if lab.get('abnormal')][:5]
+        abnormal_labs = [lab for lab in labs if lab.get('abnormal')]
         critical_labs_list = []
         for lab in abnormal_labs:
             name = lab.get('test_name', '')
@@ -653,9 +668,9 @@ class SummaryService:
                 critical_labs_list.append(f"{name} {value}{' ' + unit if unit else ''}")
         critical_labs = ', '.join(critical_labs_list) if critical_labs_list else 'No critical abnormals'
         
-        # Key events (top 5 significant events)
+        # Key events
         key_events_list = []
-        for event in timeline[:5]:
+        for event in timeline:
             date = event.get('date', '')
             desc = event.get('description', '')
             if desc:
@@ -664,7 +679,7 @@ class SummaryService:
         
         # Concerns from contradictions
         concerns_list = []
-        for c in contradictions[:3]:
+        for c in contradictions:
             desc = c.get('description', '')
             if desc:
                 concerns_list.append(desc)
@@ -741,18 +756,26 @@ class SummaryService:
         return "\n".join(lines) if lines else "No timeline events available"
 
     def _format_contradictions_for_prompt(self, contradictions: List[Dict]) -> str:
-        """Format potential missing info for prompt - Include ALL items"""
+        """Format potential clinical contradictions for prompt - Include ALL items"""
         if not contradictions:
-            return "No potential missing information identified"
+            return "No clinical contradictions to report."
 
         lines = []
-        for c in contradictions:  # Include all contradiction items
-            desc = c.get('description', 'No description')
-            suggestion = c.get('suggestion', '')
-            if suggestion:
-                lines.append(f"- {desc} ({suggestion})")
+        for c in contradictions:
+            desc = c.get('description', '')
+            c_type = c.get('type', '').upper()
+            
+            # Categorize for better LLM reasoning
+            if 'CONFLICT' in c_type or 'SAFETY' in c_type:
+                prefix = "• [SAFETY ALERT / CLINICAL CONFLICT]:"
+            elif 'RADIOLOGY' in c_type or 'DIAGNOSTIC' in c_type or 'INCONSISTENCY' in c_type:
+                prefix = "• [DIAGNOSTIC DISCORDANCE]:"
+            elif 'CHRONOLOGICAL' in c_type or 'TEMPORAL' in c_type:
+                prefix = "• [TEMPORAL INCONSISTENCY]:"
             else:
-                lines.append(f"- {desc} (May require review)")
+                prefix = "• [DOCUMENTATION GAP / DISCORDANCE]:"
+                
+            lines.append(f"{prefix} {desc}")
         return "\n".join(lines)
 
     def _build_tier2_variables_from_payload(
@@ -800,7 +823,7 @@ class SummaryService:
                 procedures_summary.append(f"- {name} (Date: {date})" if date else f"- {name}")
         procedures_text = "\n".join(procedures_summary) if procedures_summary else "Not explicitly documented"
         
-        vitals = clinical_data.get("vitals", [])[:10]
+        vitals = clinical_data.get("vitals", [])
         vitals_summary = []
         for vital in vitals:
             if isinstance(vital, dict) and vital.get("type") and vital.get("value"):
@@ -830,6 +853,7 @@ class SummaryService:
             "case_number": case_number_token,
             "admission_date": clinical_data.get("admission_date", "Not documented in extraction"),
             "discharge_date": clinical_data.get("discharge_date", "Not documented in extraction"),
+            "stated_los": clinical_data.get("length_of_stay", "Not explicitly documented"),
             "diagnoses_str": diagnoses_str,
             "meds_text": meds_text,
             "allergies_text": self._format_allergies_for_prompt(clinical_data.get("allergies", [])),
