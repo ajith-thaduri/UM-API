@@ -248,11 +248,31 @@ class SummaryService:
                     max_tokens=6000,
                 )
                 
-                # Step 4: Re-identify summary (reverse tokens and dates)
+                # Step 4: Parse JSON response and extract confidence metadata
+                try:
+                    from app.services.llm_utils import extract_json_from_response
+                    import json
+                    
+                    parsed_response = extract_json_from_response(response)
+                    markdown_content = parsed_response.get("summary_markdown", response)
+                    confidence_info = parsed_response.get("confidence_evaluation", {})
+                    
+                    # Store as a combined JSON string for the frontend to digest
+                    # This avoids database schema changes while providing the data
+                    combined_result = json.dumps({
+                        "markdown": markdown_content,
+                        "confidence": confidence_info
+                    })
+                    response_to_process = combined_result
+                except Exception as e:
+                    safe_logger.warning(f"Failed to parse JSON summary response: {e}. Falling back to raw text.")
+                    response_to_process = response
+
+                # Step 5: Re-identify summary (reverse tokens and dates)
                 final_summary = presidio_deidentification_service.re_identify_summary(
                     db=db,
                     vault_id=vault_id,
-                    summary_text=response,
+                    summary_text=response_to_process,
                 )
                 
                 # Step 5: Track usage
@@ -318,7 +338,7 @@ class SummaryService:
 
             try:
                 from app.services.llm.claude_service import ClaudeService
-                prompt += "\n\nPROVIDER-SPECIFIC GUIDANCE: Aim for 2500-3500 tokens total. Be comprehensive but concise. OUTPUT ONLY HUMAN-READABLE MARKDOWN. DO NOT USE JSON."
+                prompt += "\n\nPROVIDER-SPECIFIC GUIDANCE: Aim for 2500-3500 tokens total. Be comprehensive but concise."
                 prompt_with_rules = prompt # Removed EXTRACTION_RULES which forced JSON
 
                 response, usage = await llm_service.chat_completion(
@@ -328,8 +348,28 @@ class SummaryService:
                     max_tokens=6000,
                 )
 
+                # Parse JSON response and extract confidence metadata
+                try:
+                    from app.services.llm_utils import extract_json_from_response
+                    import json
+                    
+                    parsed_response = extract_json_from_response(response)
+                    markdown_content = parsed_response.get("summary_markdown", response)
+                    confidence_info = parsed_response.get("confidence_evaluation", {})
+                    
+                    combined_result = json.dumps({
+                        "markdown": markdown_content,
+                        "confidence": confidence_info
+                    })
+                    response_to_process = combined_result
+                except Exception as e:
+                    safe_logger.warning(f"Failed to parse JSON summary response (legacy): {e}")
+                    response_to_process = response
+
                 if shift_days:
-                    response = date_shift_service.reidentify_summary_text(response, shift_days)
+                    response_to_process = date_shift_service.reidentify_summary_text(response_to_process, shift_days)
+
+                response = response_to_process
 
                 if user_id and db:
                     try:
@@ -482,11 +522,29 @@ class SummaryService:
                     max_tokens=2000,
                 )
                 
+                # Parse JSON response and extract confidence metadata
+                try:
+                    from app.services.llm_utils import extract_json_from_response
+                    import json
+                    
+                    parsed_response = extract_json_from_response(response)
+                    markdown_content = parsed_response.get("summary_markdown", response)
+                    confidence_info = parsed_response.get("confidence_evaluation", {})
+                    
+                    combined_result = json.dumps({
+                        "markdown": markdown_content,
+                        "confidence": confidence_info
+                    })
+                    response_to_process = combined_result
+                except Exception as e:
+                    safe_logger.warning(f"Failed to parse JSON executive summary response: {e}")
+                    response_to_process = response
+
                 # Step 4: Re-identify the response
                 final_summary = presidio_deidentification_service.re_identify_summary(
                     db=db,
                     vault_id=vault_id,
-                    summary_text=response,
+                    summary_text=response_to_process,
                 )
                 
                 # Track usage
@@ -570,6 +628,24 @@ class SummaryService:
                 temperature=0.1,
                 max_tokens=max_tokens
             )
+
+            # Parse JSON response and extract confidence metadata
+            try:
+                from app.services.llm_utils import extract_json_from_response
+                import json
+                
+                parsed_response = extract_json_from_response(response)
+                markdown_content = parsed_response.get("summary_markdown", response)
+                confidence_info = parsed_response.get("confidence_evaluation", {})
+                
+                combined_result = json.dumps({
+                    "markdown": markdown_content,
+                    "confidence": confidence_info
+                })
+                response = combined_result
+            except Exception as e:
+                safe_logger.warning(f"Failed to parse JSON legacy executive summary response: {e}")
+                # Keep original response
 
             # Track usage if user_id is available
             if user_id and db:
