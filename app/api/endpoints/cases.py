@@ -8,8 +8,10 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 
 from app.db.session import get_db
+from app.core.redis import enqueue_case_processing
 from app.db.dependencies import get_case_repository, get_case_file_repository, get_extraction_repository
 from app.repositories.case_repository import CaseRepository
 from app.repositories.case_file_repository import CaseFileRepository
@@ -324,10 +326,14 @@ async def upload_case(
         new_case.page_count = total_pages
         case_repository.update(db, new_case)
 
-        # Trigger background processing (async)
-        async def process_case_async():
-            await case_processor.process_case(case_id)
-        background_tasks.add_task(process_case_async)
+        # Enqueue case processing on UM-Jobs (non-blocking)
+        job_id = await enqueue_case_processing(case_id, str(current_user.id))
+        if job_id is None:
+            # Fallback if Redis/ARQ unavailable
+            async def process_case_async():
+                await case_processor.process_case(case_id)
+            background_tasks.add_task(process_case_async)
+            logger.warning("Enqueue failed; using in-process background task")
 
         return UploadResponse(
             case_id=case_id,
@@ -352,16 +358,17 @@ async def generate_summary(
     case_repository: CaseRepository = Depends(get_case_repository),
     current_user: User = Depends(get_current_user),
 ):
-    """Trigger summary generation for a case"""
+    """Trigger summary generation for a case (enqueued to UM-Jobs)"""
     case = case_repository.get_by_id(db, case_id, user_id=current_user.id)
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
 
-    # Trigger reprocessing (no db session passed - will create new one)
-    # Trigger background processing (async)
-    async def process_case_async():
-        await case_processor.process_case(case_id)
-    background_tasks.add_task(process_case_async)
+    job_id = await enqueue_case_processing(case_id, str(current_user.id))
+    if job_id is None:
+        async def process_case_async():
+            await case_processor.process_case(case_id)
+        background_tasks.add_task(process_case_async)
+        logger.warning("Enqueue failed; using in-process background task")
 
     return {
         "message": "Summary regeneration started",
@@ -377,7 +384,7 @@ async def retry_processing(
     case_repository: CaseRepository = Depends(get_case_repository),
     current_user: User = Depends(get_current_user),
 ):
-    """Retry processing for a failed case"""
+    """Retry processing for a failed case (clears job state, enqueues J1 to UM-Jobs)"""
     case = case_repository.get_by_id(db, case_id, user_id=current_user.id)
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
@@ -387,11 +394,20 @@ async def retry_processing(
     case.processed_at = None
     case_repository.update(db, case)
 
-    # Trigger reprocessing (no db session passed - will create new one)
-    # Trigger background processing (async)
-    async def process_case_async():
-        await case_processor.process_case(case_id)
-    background_tasks.add_task(process_case_async)
+    # Clear UM-Jobs checkpoint state so pipeline restarts from J1
+    try:
+        db.execute(text("DELETE FROM case_jobs WHERE case_id = :cid"), {"cid": case_id})
+        db.commit()
+    except Exception as e:
+        logger.warning("Clear case_jobs failed (table may not exist): %s", e)
+        db.rollback()
+
+    job_id = await enqueue_case_processing(case_id, str(current_user.id))
+    if job_id is None:
+        async def process_case_async():
+            await case_processor.process_case(case_id)
+        background_tasks.add_task(process_case_async)
+        logger.warning("Enqueue failed; using in-process background task")
 
     return {
         "message": "Processing retry initiated",

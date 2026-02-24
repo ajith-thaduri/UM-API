@@ -80,26 +80,69 @@ def extract_json_from_response(response: str) -> dict:
     # Try to find JSON object boundaries (find first { and last })
     first_brace = response.find('{')
     last_brace = response.rfind('}')
-    
+
     if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
         json_str = response[first_brace:last_brace + 1]
         try:
             return json.loads(json_str)
         except json.JSONDecodeError:
             pass
-    
+
     # Try to find JSON array boundaries (find first [ and last ])
     first_bracket = response.find('[')
     last_bracket = response.rfind(']')
-    
+
     if first_bracket != -1 and last_bracket != -1 and last_bracket > first_bracket:
         json_str = response[first_bracket:last_bracket + 1]
         try:
             return json.loads(json_str)
         except json.JSONDecodeError:
             pass
-    
-    # If all else fails, log the response and raise an error
+
+    # Last resort: the LLM may have returned a truncated JSON object (cut off mid-stream).
+    # Attempt to auto-close the truncated string so the parser can at least recover the
+    # fields that were fully written before the cutoff.
+    if first_brace != -1:
+        truncated = response[first_brace:]
+        # Count unmatched braces/brackets/quotes to decide what to append
+        closers: list[str] = []
+        in_string = False
+        escape_next = False
+        for ch in truncated:
+            if escape_next:
+                escape_next = False
+                continue
+            if ch == '\\' and in_string:
+                escape_next = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == '{':
+                closers.append('}')
+            elif ch == '[':
+                closers.append(']')
+            elif ch in (')', '}', ']') and closers:
+                closers.pop()
+
+        # If we were mid-string, close it first
+        tail = '"' if in_string else ''
+        tail += ''.join(reversed(closers))
+
+        if tail:
+            try:
+                recovered = json.loads(truncated + tail)
+                logger.warning(
+                    "Recovered partial JSON from truncated LLM response (appended %r). "
+                    "First 200 chars of original: %s",
+                    tail, original_response[:200],
+                )
+                return recovered
+            except json.JSONDecodeError:
+                pass
+
     logger.error(f"Could not extract valid JSON from response. First 500 chars: {original_response[:500]}")
     raise ValueError(f"Could not extract valid JSON from response: {original_response[:200]}")
 

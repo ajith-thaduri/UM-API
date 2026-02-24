@@ -61,6 +61,10 @@ google-auth-oauthlib==1.2.0
 google-auth-httplib2==0.2.0
 cryptography==42.0.0  # For token encryption
 
+# Job queue (UM-Jobs workers consume; API only enqueues)
+arq==0.26.1
+redis==5.0.8
+
 # Utilities
 httpx==0.27.2
 python-dateutil==2.9.0

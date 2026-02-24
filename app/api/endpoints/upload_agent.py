@@ -451,34 +451,42 @@ async def confirm_upload(
 
 
 async def _process_with_status_updates(case_id: str, session_id: str):
-    """Process case with status updates to the agent"""
-    import asyncio
+    """Enqueue case to UM-Jobs (non-blocking). Falls back to in-process if Redis unavailable."""
     from app.db.session import SessionLocal
-    from app.models.case import Case, CaseStatus
-    
+    from app.core.redis import enqueue_case_processing, get_arq_pool
+
     db = SessionLocal()
     try:
-        # Update status: extracting text
+        # Update status to queued / extracting_text immediately
         upload_agent_service.update_processing_status(db, session_id, "extracting_text", 10)
         logger.info(f"Starting processing for case {case_id}")
-        
-        # Get request metadata from session
+
+        # Get request metadata from session (stored for UM-Jobs to use if needed)
         session = upload_agent_service.get_session(db, session_id)
+        user_id = session.user_id if session else None
+
+        # Try to enqueue to UM-Jobs first (non-blocking)
+        job_id = await enqueue_case_processing(case_id, user_id or "")
+
+        if job_id:
+            # Enqueued successfully — UM-Jobs will update Case.status when done
+            logger.info(f"Case {case_id} enqueued to UM-Jobs (job_id={job_id})")
+            upload_agent_service.update_processing_status(db, session_id, "queued", 15, case_id)
+            return
+
+        # Fallback: Redis/ARQ unavailable — run in-process (original behaviour)
+        logger.warning(f"ARQ unavailable — processing case {case_id} in-process (fallback)")
         request_metadata = None
         if session and (session.request_type or session.requested_service or session.request_date):
-            # Use urgency from session (always manually provided)
             urgency_value = session.urgency if hasattr(session, 'urgency') and session.urgency else 'Routine'
-            
             request_metadata = {
                 "request_type": session.request_type or "Not specified",
                 "requested_service": session.requested_service or "Not specified",
                 "request_date": session.request_date or "Not specified",
-                "urgency": urgency_value
+                "urgency": urgency_value,
             }
             logger.info(f"Passing request metadata to process_case: {request_metadata}")
-        
-        # Process the case in a thread executor (it's a sync function)
-        loop = asyncio.get_event_loop()
+
         result = await case_processor.process_case(case_id, None, request_metadata)
         
         # Check result

@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     DATABASE_POOL_SIZE: int = 10
     DATABASE_MAX_OVERFLOW: int = 20
 
+    # Redis - job queue (UM-Jobs workers listen here; API enqueues only)
+    REDIS_URL: str = "redis://localhost:6379/0"
+
     # Storage
     STORAGE_TYPE: str = "s3"  # local, s3, azure
     STORAGE_PATH: str = "./storage"  # Only used for local storage

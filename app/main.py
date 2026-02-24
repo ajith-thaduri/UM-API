@@ -21,11 +21,17 @@ from app.middleware.rate_limit import rate_limit_middleware
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup logic
-    # Set exception handler to suppress harmless httpx cleanup errors
     loop = asyncio.get_running_loop()
     loop.set_exception_handler(handle_task_exception)
     logger.info("Application startup complete")
-    
+
+    # ARQ Redis pool (for enqueueing case jobs to UM-Jobs)
+    try:
+        from app.core.redis import init_arq_pool
+        await init_arq_pool()
+    except Exception as e:
+        logger.warning("ARQ pool init skipped: %s", e)
+
     # Init Models
     try:
         from app.db.session import SessionLocal
@@ -36,10 +42,15 @@ async def lifespan(app: FastAPI):
         logger.info("LLM Models seeded successfully")
     except Exception as e:
         logger.warning(f"Failed to seed LLM models: {e}")
-    
+
     yield
-    
+
     # Cleanup on application shutdown
+    try:
+        from app.core.redis import close_arq_pool
+        await close_arq_pool()
+    except Exception as e:
+        logger.warning("ARQ pool close: %s", e)
     try:
         from app.services.llm.llm_factory import close_all_llm_services
         await close_all_llm_services()
