@@ -143,6 +143,24 @@ def extract_json_from_response(response: str) -> dict:
             except json.JSONDecodeError:
                 pass
 
+    # Extra recovery: LLM sometimes truncates as {"final{" or {"key": { (no content).
+    # Close the open string (key), add : null, then close braces. Try 1 and 2 closing braces
+    # because a "{" inside the key string shouldn't count as an open brace.
+    if first_brace != -1:
+        truncated_trim = response[first_brace:].rstrip()
+        open_brackets = max(0, truncated_trim.count("[") - truncated_trim.count("]"))
+        for n_close in range(1, 4):
+            try:
+                candidate = truncated_trim + '": null' + "]" * open_brackets + "}" * n_close
+                recovered = json.loads(candidate)
+                logger.warning(
+                    "Recovered truncated JSON (appended ': null' + %d closers). First 200 chars: %s",
+                    n_close, original_response[:200],
+                )
+                return recovered
+            except json.JSONDecodeError:
+                continue
+
     logger.error(f"Could not extract valid JSON from response. First 500 chars: {original_response[:500]}")
     raise ValueError(f"Could not extract valid JSON from response: {original_response[:200]}")
 

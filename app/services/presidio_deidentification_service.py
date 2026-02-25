@@ -219,8 +219,8 @@ class PresidioDeIdentificationService:
     def __init__(self):
         self.analyzer = None
         self.anonymizer = None
-        self.active_ner_engine: str = "spacy"
-        self.active_model_name: str = "en_core_web_lg"
+        self.active_ner_engine: str = "transformers"
+        self.active_model_name: str = "StanfordAIMI/stanford-deidentifier-base"
         self.active_engine_id: Optional[str] = None
         self.custom_recognizers = [
             MRNRecognizer,
@@ -237,67 +237,60 @@ class PresidioDeIdentificationService:
         ]
 
         if PRESIDIO_AVAILABLE:
-            try:
-                self.anonymizer = AnonymizerEngine()
-                # Initialize from DB
-                self._load_active_engine_from_db()
-                safe_logger.info(
-                    f"PresidioDeIdentificationService initialized with NER engine: {self.active_ner_engine}"
-                )
-            except Exception as e:
-                safe_logger.error(f"Failed to initialize Presidio: {e}")
+            self.anonymizer = AnonymizerEngine()
+            self._load_active_engine_from_db()
+            safe_logger.info(
+                f"PresidioDeIdentificationService initialized with NER engine: {self.active_ner_engine} "
+                f"({self.active_model_name})"
+            )
+
+    _STANFORD_MODEL = "StanfordAIMI/stanford-deidentifier-base"
 
     def _load_active_engine_from_db(self):
-        """Load the currently active engine configuration from the database."""
+        """Load the active engine from DB for audit/logging only.
+
+        Regardless of what the DB says, case processing ALWAYS uses the Stanford
+        AIMI transformers model.  spaCy is intentionally never used here.
+        """
         db = SessionLocal()
         try:
             active_engine = db.query(PresidioEngine).filter(PresidioEngine.is_active == True).first()
-            
-            if active_engine:
-                self.active_ner_engine = active_engine.engine_type
-                self.active_model_name = active_engine.model_name
-                self.active_engine_id = active_engine.id
-                safe_logger.info(f"Loading active engine from DB: {active_engine.name} ({active_engine.engine_type})")
-            else:
-                # Fallback to config default (Stanford AIMI when PRESIDIO_NER_ENGINE=transformers)
-                self.active_ner_engine = getattr(settings, "PRESIDIO_NER_ENGINE", "transformers")
-                if self.active_ner_engine == "transformers":
-                    self.active_model_name = getattr(settings, "PRESIDIO_TRANSFORMER_MODEL", "StanfordAIMI/stanford-deidentifier-base")
-                else:
-                    self.active_model_name = getattr(settings, "PRESIDIO_NER_MODEL", "en_core_web_lg")
-                self.active_engine_id = None
-                safe_logger.info(f"No active engine in DB, using config default: {self.active_ner_engine} / {self.active_model_name}")
 
-            # Initialize the appropriate engine
-            if self.active_ner_engine == "transformers":
-                self._init_transformers_engine()
+            if active_engine:
+                self.active_engine_id = active_engine.id
+                if active_engine.engine_type != "transformers" or active_engine.model_name != self._STANFORD_MODEL:
+                    safe_logger.warning(
+                        f"DB active engine is '{active_engine.name}' ({active_engine.model_name}), "
+                        f"but case processing enforces Stanford AIMI only. Ignoring DB selection."
+                    )
+                else:
+                    safe_logger.info(f"DB engine confirmed: {active_engine.name} ({active_engine.model_name})")
             else:
-                self._init_spacy_engine()
-                
-            # Register custom recognizers
+                self.active_engine_id = None
+                safe_logger.info("No active engine in DB — using Stanford AIMI (default).")
+
+            # Always use Stanford AIMI for case processing — no spaCy, no other model.
+            self.active_ner_engine = "transformers"
+            self.active_model_name = self._STANFORD_MODEL
+            self._init_transformers_engine()
             self._register_custom_recognizers()
         except Exception as e:
-            safe_logger.error(f"Error loading engine from DB: {e}")
-            # Emergency fallback: use config default (Stanford AIMI)
-            self.active_ner_engine = getattr(settings, "PRESIDIO_NER_ENGINE", "transformers")
-            if self.active_ner_engine == "transformers":
-                self.active_model_name = getattr(settings, "PRESIDIO_TRANSFORMER_MODEL", "StanfordAIMI/stanford-deidentifier-base")
-                self._init_transformers_engine()
-            else:
-                self.active_model_name = getattr(settings, "PRESIDIO_NER_MODEL", "en_core_web_lg")
-                self._init_spacy_engine()
+            safe_logger.error(
+                f"Failed to initialize Stanford AIMI engine: {e}. "
+                "De-identification is unavailable — case processing will be blocked."
+            )
+            raise RuntimeError(
+                f"Presidio Stanford AIMI engine failed to initialize: {e}"
+            ) from e
         finally:
             db.close()
 
     def _init_analyzer(self, engine_type: str):
-        """Initialize the analyzer engine with the specified NER backend."""
-        if engine_type == "transformers":
-            self._init_transformers_engine()
-        else:
-            self._init_spacy_engine()
+        """Initialize the analyzer engine. Always uses transformers/Stanford AIMI."""
+        self._init_transformers_engine()
 
     def _init_spacy_engine(self):
-        """Initialize with spaCy NLP engine (default)."""
+        """Initialize with spaCy NLP engine. Not used for case processing (Stanford AIMI only)."""
         try:
             # Use active_model_name if it's a spacy model (no /), otherwise default to en_core_web_lg
             model_name = self.active_model_name
@@ -314,40 +307,55 @@ class PresidioDeIdentificationService:
             self.active_ner_engine = "spacy"
             self.active_model_name = model_name
             safe_logger.info(f"Presidio spaCy engine initialized with model: {model_name}")
+        except SystemExit as e:
+            # spaCy calls sys.exit() when a model is not installed/incompatible.
+            # Catch it here so the worker process does not die.
+            safe_logger.error(
+                f"spaCy model '{self.active_model_name}' is not installed or incompatible "
+                f"(spaCy raised SystemExit: {e}). Falling back to en_core_web_lg."
+            )
+            try:
+                fallback = "en_core_web_lg"
+                nlp_config = {"nlp_engine_name": "spacy", "models": [{"lang_code": "en", "model_name": fallback}]}
+                provider = NlpEngineProvider(nlp_configuration=nlp_config)
+                nlp_engine = provider.create_engine()
+                self.analyzer = AnalyzerEngine(nlp_engine=nlp_engine)
+                self.active_ner_engine = "spacy"
+                self.active_model_name = fallback
+                safe_logger.info(f"Presidio spaCy engine initialized with fallback model: {fallback}")
+            except Exception as fallback_err:
+                safe_logger.error(f"Fallback spaCy engine also failed: {fallback_err}")
+                raise RuntimeError(f"Cannot initialize Presidio spaCy engine: {fallback_err}") from fallback_err
         except Exception as e:
             safe_logger.error(f"Failed to initialize spaCy engine: {e}")
             raise
 
     def _init_transformers_engine(self):
-        """Initialize with HuggingFace transformers engine."""
-        try:
-            # Use active_model_name if it's a transformer model (contains /), otherwise default
-            model_name = self.active_model_name
-            if not model_name or "/" not in model_name:
-                model_name = getattr(settings, "PRESIDIO_TRANSFORMER_MODEL", "obi/deid_roberta_i2b2")
-            
-            nlp_config = {
-                "nlp_engine_name": "transformers",
-                "models": [{
-                    "lang_code": "en",
-                    "model_name": {
-                        "spacy": "en_core_web_sm",
-                        "transformers": model_name,
-                    },
-                }],
-                "model_to_presidio_entity_mapping": ROBERTA_LABEL_TO_PRESIDIO,
-            }
-            
-            nlp_engine = NlpEngineProvider(nlp_configuration=nlp_config).create_engine()
-            self.analyzer = AnalyzerEngine(nlp_engine=nlp_engine)
-            self.active_ner_engine = "transformers"
-            self.active_model_name = model_name
-            safe_logger.info(f"Presidio transformers engine initialized with model: {model_name}")
-        except Exception as e:
-            safe_logger.error(f"Failed to initialize transformers engine: {e}")
-            # Fallback to spacy
-            safe_logger.warning("Falling back to spaCy engine")
-            self._init_spacy_engine()
+        """Initialize with Stanford AIMI HuggingFace transformers engine.
+
+        This is the ONLY model used for case processing.  No spaCy fallback.
+        A failure here is a hard error — workers should not process cases with
+        a degraded / wrong model.
+        """
+        model_name = self._STANFORD_MODEL
+
+        nlp_config = {
+            "nlp_engine_name": "transformers",
+            "models": [{
+                "lang_code": "en",
+                "model_name": {
+                    "spacy": "en_core_web_sm",
+                    "transformers": model_name,
+                },
+            }],
+            "model_to_presidio_entity_mapping": ROBERTA_LABEL_TO_PRESIDIO,
+        }
+
+        nlp_engine = NlpEngineProvider(nlp_configuration=nlp_config).create_engine()
+        self.analyzer = AnalyzerEngine(nlp_engine=nlp_engine)
+        self.active_ner_engine = "transformers"
+        self.active_model_name = model_name
+        safe_logger.info(f"Presidio transformers engine initialized with model: {model_name}")
 
     def _register_custom_recognizers(self):
         """Register all custom medical PHI recognizers into the current analyzer instance."""
@@ -371,12 +379,16 @@ class PresidioDeIdentificationService:
 
     def switch_ner_engine(self, engine_type: str = None, model_id: str = None) -> Dict[str, Any]:
         """
-        Switch the NER engine at runtime using either engine_type (legacy) or model_id (DB).
-        
+        Switch the DB active engine record (for Presidio Lab / audit purposes only).
+
+        NOTE: Case processing is permanently locked to Stanford AIMI.  Calling this
+        method updates the DB record and reloads the service, but _load_active_engine_from_db
+        will always enforce Stanford AIMI regardless of the DB selection.
+
         Args:
-            engine_type: "spacy" or "transformers" (optional, legacy behavior)
-            model_id: UUID of the model in presidio_engines table (preferred)
-            
+            engine_type: legacy type filter (ignored for case processing)
+            model_id: UUID of the model in presidio_engines table
+
         Returns:
             dict with status info
         """
