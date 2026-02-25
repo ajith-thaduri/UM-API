@@ -40,6 +40,7 @@ def _redis_settings_from_url(url: str) -> RedisSettings:
     parsed = urlparse(url)
     ssl = parsed.scheme == "rediss"
 
+    # Match UM-Jobs: higher timeouts and retries so reconnects after idle don't fail.
     kwargs = dict(
         host=parsed.hostname or "localhost",
         port=parsed.port or 6379,
@@ -47,9 +48,10 @@ def _redis_settings_from_url(url: str) -> RedisSettings:
         password=parsed.password or None,
         username=parsed.username or None,
         ssl=ssl,
-        conn_timeout=10,
-        conn_retries=10,
+        conn_timeout=30,
+        conn_retries=20,
         conn_retry_delay=2.0,
+        retry_on_timeout=True,
     )
 
     if ssl:
