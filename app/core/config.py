@@ -1,7 +1,7 @@
 """Application configuration"""
 
 from typing import List, Any
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -31,8 +31,23 @@ class Settings(BaseSettings):
     DATABASE_POOL_SIZE: int = 10
     DATABASE_MAX_OVERFLOW: int = 20
 
-    # Redis - job queue (UM-Jobs workers listen here; API enqueues only)
+    # ── Jobs mode switch ──────────────────────────────────────────────────────
+    # Set JOBS_MODE=local   → routes jobs to local UM-Jobs (development/testing)
+    # Set JOBS_MODE=deployed → routes jobs to Render UM-Jobs (staging/production)
+    JOBS_MODE: str = "local"
+    REDIS_URL_LOCAL: str = "redis://localhost:6379/0"
+    REDIS_URL_DEPLOYED: str = ""
+
+    # Resolved at startup by the validator below — do not set this directly.
     REDIS_URL: str = "redis://localhost:6379/0"
+
+    @model_validator(mode="after")
+    def resolve_redis_url(self) -> "Settings":
+        if self.JOBS_MODE == "deployed" and self.REDIS_URL_DEPLOYED:
+            self.REDIS_URL = self.REDIS_URL_DEPLOYED
+        elif self.JOBS_MODE == "local" and self.REDIS_URL_LOCAL:
+            self.REDIS_URL = self.REDIS_URL_LOCAL
+        return self
 
     # Storage
     STORAGE_TYPE: str = "s3"  # local, s3, azure

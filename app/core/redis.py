@@ -30,15 +30,47 @@ async def get_arq_pool() -> ArqRedis:
     return _arq_pool
 
 
+def _redis_settings_from_url(url: str) -> RedisSettings:
+    """Parse a redis:// or rediss:// URL into a RedisSettings with TLS support.
+
+    Uses certifi CA bundle when ssl=True so macOS Python (which doesn't use
+    the system cert store) can verify Render's TLS certificate.
+    """
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    ssl = parsed.scheme == "rediss"
+
+    kwargs = dict(
+        host=parsed.hostname or "localhost",
+        port=parsed.port or 6379,
+        database=int((parsed.path or "/0").lstrip("/") or "0"),
+        password=parsed.password or None,
+        username=parsed.username or None,
+        ssl=ssl,
+        conn_timeout=10,
+        conn_retries=10,
+        conn_retry_delay=2.0,
+    )
+
+    if ssl:
+        try:
+            import certifi
+            kwargs["ssl_ca_certs"] = certifi.where()
+        except ImportError:
+            pass
+
+    return RedisSettings(**kwargs)
+
+
 async def init_arq_pool() -> None:
     """Create the ARQ pool. Call once during app lifespan startup."""
     global _arq_pool
     if _arq_pool is not None:
         return
     try:
-        redis_settings = RedisSettings.from_dsn(settings.REDIS_URL)
+        redis_settings = _redis_settings_from_url(settings.REDIS_URL)
         _arq_pool = await create_pool(redis_settings)
-        logger.info("ARQ pool connected to Redis (queue=%s)", TIER1_QUEUE)
+        logger.info("ARQ pool connected to Redis at %s (queue=%s)", settings.REDIS_URL.split("@")[-1], TIER1_QUEUE)
     except Exception as e:
         logger.warning("ARQ pool init failed (case processing will use in-process fallback): %s", e)
 
