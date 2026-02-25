@@ -186,8 +186,8 @@ class SummaryService:
                 else:
                     safe_logger.info(f"Using Tier 2 de-identification for case {case_id}")
                     
-                    # Step 1: De-identify data using PresidioDeIdentificationService
-                    de_id_payload, vault_id, token_map = presidio_deidentification_service.de_identify_for_summary(
+                    # Step 1: De-identify data (runs in thread pool — does not block event loop)
+                    de_id_payload, vault_id, token_map = await presidio_deidentification_service.de_identify_for_summary_async(
                         db=db,
                         case_id=case_id,
                         user_id=user_id,
@@ -196,7 +196,7 @@ class SummaryService:
                         clinical_data=extracted_data,
                         red_flags=contradictions,
                         case_metadata={"case_number": case_number},
-                        document_chunks=document_chunks
+                        document_chunks=document_chunks,
                     )
                     
                     # Find actual tokens for patient and case number
@@ -268,8 +268,8 @@ class SummaryService:
                     safe_logger.warning(f"Failed to parse JSON summary response: {e}. Falling back to raw text.")
                     response_to_process = response
 
-                # Step 5: Re-identify summary (reverse tokens and dates)
-                final_summary = presidio_deidentification_service.re_identify_summary(
+                # Step 5: Re-identify summary (runs in thread pool — does not block event loop)
+                final_summary = await presidio_deidentification_service.re_identify_summary_async(
                     db=db,
                     vault_id=vault_id,
                     summary_text=response_to_process,
@@ -451,8 +451,8 @@ class SummaryService:
                 else:
                     safe_logger.info(f"Using Tier 2 de-identification for executive summary of case {case_id}")
                     
-                    # Step 1: De-identify data
-                    de_id_payload, vault_id, token_map = presidio_deidentification_service.de_identify_for_summary(
+                    # Step 1: De-identify data (runs in thread pool — does not block event loop)
+                    de_id_payload, vault_id, token_map = await presidio_deidentification_service.de_identify_for_summary_async(
                         db=db,
                         case_id=case_id,
                         user_id=user_id,
@@ -461,7 +461,7 @@ class SummaryService:
                         clinical_data=extracted_data,
                         red_flags=contradictions,
                         case_metadata={"case_number": case_number},
-                        document_chunks=document_chunks
+                        document_chunks=document_chunks,
                     )
                     
                     # Find actual tokens for patient and case number
@@ -540,8 +540,8 @@ class SummaryService:
                     safe_logger.warning(f"Failed to parse JSON executive summary response: {e}")
                     response_to_process = response
 
-                # Step 4: Re-identify the response
-                final_summary = presidio_deidentification_service.re_identify_summary(
+                # Step 4: Re-identify the response (runs in thread pool — does not block event loop)
+                final_summary = await presidio_deidentification_service.re_identify_summary_async(
                     db=db,
                     vault_id=vault_id,
                     summary_text=response_to_process,

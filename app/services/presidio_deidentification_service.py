@@ -27,11 +27,14 @@ Usage:
     )
 """
 
+import asyncio
 import json
 import random
 import re
 import uuid
 from copy import deepcopy
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -1003,6 +1006,72 @@ class PresidioDeIdentificationService:
         # Use the robust reidentify_summary_text from date_shift_service
         # which internally uses subtract logic (direction=-1)
         return date_shift_service.reidentify_summary_text(text, shift_days)
+
+    # -------------------------------------------------------------------------
+    # Async wrappers: run CPU-bound Presidio in a thread pool so the event loop
+    # stays responsive (used by UM-Jobs workers and summary_service).
+    # -------------------------------------------------------------------------
+
+    _executor: Optional[ThreadPoolExecutor] = None
+
+    def _get_executor(self) -> ThreadPoolExecutor:
+        """Shared thread pool for Presidio (CPU-bound). Limits concurrent runs."""
+        if PresidioDeIdentificationService._executor is None:
+            PresidioDeIdentificationService._executor = ThreadPoolExecutor(
+                max_workers=4,
+                thread_name_prefix="presidio_",
+            )
+        return PresidioDeIdentificationService._executor
+
+    async def de_identify_for_summary_async(
+        self,
+        db: Session,
+        case_id: str,
+        user_id: str,
+        patient_name: str,
+        timeline: List[Dict],
+        clinical_data: Dict,
+        red_flags: List[Dict],
+        case_metadata: Optional[Dict] = None,
+        score_threshold: Optional[float] = None,
+        document_chunks: Optional[List[str]] = None,
+        loop: Optional[asyncio.AbstractEventLoop] = None,
+    ) -> Tuple[Dict, str, Dict[str, str]]:
+        """
+        Async wrapper: runs de_identify_for_summary in a thread pool so the
+        event loop is not blocked for ~30s. Use this from async code (workers,
+        summary_service).
+        """
+        loop = loop or asyncio.get_running_loop()
+        fn = partial(
+            self.de_identify_for_summary,
+            db=db,
+            case_id=case_id,
+            user_id=user_id,
+            patient_name=patient_name,
+            timeline=timeline,
+            clinical_data=clinical_data,
+            red_flags=red_flags,
+            case_metadata=case_metadata,
+            score_threshold=score_threshold,
+            document_chunks=document_chunks,
+        )
+        return await loop.run_in_executor(self._get_executor(), fn)
+
+    async def re_identify_summary_async(
+        self,
+        db: Session,
+        vault_id: str,
+        summary_text: str,
+        loop: Optional[asyncio.AbstractEventLoop] = None,
+    ) -> str:
+        """
+        Async wrapper: runs re_identify_summary in a thread pool. Use from
+        async code after receiving the LLM response.
+        """
+        loop = loop or asyncio.get_running_loop()
+        fn = partial(self.re_identify_summary, db=db, vault_id=vault_id, summary_text=summary_text)
+        return await loop.run_in_executor(self._get_executor(), fn)
 
 
 # Singleton instance

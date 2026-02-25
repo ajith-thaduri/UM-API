@@ -804,16 +804,20 @@ Admission information, chief complaint, and hospital course.
                     )
                     last_response = response
 
-                    # Suspiciously short — almost certainly truncated garbage.  Retry.
-                    if len(response.strip()) < 10:
-                        if attempt < _MAX_LLM_RETRIES:
+                    # Try parse/recovery first so truncated JSON (e.g. '{"final{"' + newlines) can be fixed
+                    # instead of retrying. Only retry when parse actually fails.
+                    try:
+                        result = extract_json_from_response(response)
+                    except ValueError:
+                        # Parse failed — retry if response has almost no meaningful content
+                        meaningful_len = len((response or "").strip().replace(" ", "").replace("\n", ""))
+                        if meaningful_len < 20 and attempt < _MAX_LLM_RETRIES:
                             logger.warning(
-                                "[LLM] Response too short (%d chars) on attempt %d/%d, retrying: %r",
-                                len(response), attempt + 1, _MAX_LLM_RETRIES + 1, response,
+                                "[LLM] Response too short / unparseable (%d meaningful chars, %d total) on attempt %d/%d, retrying",
+                                meaningful_len, len(response or ""), attempt + 1, _MAX_LLM_RETRIES + 1,
                             )
                             continue
-
-                    result = extract_json_from_response(response)
+                        raise
 
                     # Track usage only on a successful parse.
                     if user_id and db:
@@ -868,24 +872,37 @@ Admission information, chief complaint, and hospital course.
                     return result
 
                 except ValueError as parse_err:
+                    # Summarize response for logs: avoid dumping 500 chars of newlines
+                    _stripped = (last_response or "").strip()
+                    if not last_response or not _stripped or not _stripped.replace(" ", "").replace("\n", ""):
+                        _preview = f"(empty or whitespace only, {len(last_response)} chars)"
+                    elif len(_stripped) > 80:
+                        _preview = _stripped[:80].replace("\n", " ") + "…"
+                    else:
+                        _preview = _stripped.replace("\n", " ")[:80]
                     if attempt < _MAX_LLM_RETRIES:
                         logger.warning(
-                            "[LLM] JSON parse failed on attempt %d/%d (%s) — retrying. Response: %r",
-                            attempt + 1, _MAX_LLM_RETRIES + 1, parse_err, last_response[:100],
+                            "[LLM] JSON parse failed on attempt %d/%d (%s) — retrying. Response: %s",
+                            attempt + 1, _MAX_LLM_RETRIES + 1, parse_err, _preview,
                         )
                         continue
                     logger.error(
                         f"[LLM] JSON parse failed after {_MAX_LLM_RETRIES + 1} attempts: {parse_err}",
                         exc_info=True,
                     )
-                    logger.error(f"[EXTRACTION] Response that caused error (first 500 chars): {last_response[:500]}")
+                    logger.error("[EXTRACTION] Response that caused error: %s", _preview)
                     return {}
 
             return {}
 
         except Exception as e:
             logger.error(f"LLM extraction error: {e}", exc_info=True)
-            logger.error(f"[EXTRACTION] Response that caused error (first 500 chars): {last_response[:500] if 'last_response' in locals() else 'N/A'}")
+            _resp = last_response[:500] if "last_response" in locals() and last_response else "N/A"
+            if isinstance(_resp, str) and _resp != "N/A" and (not _resp.strip() or not _resp.replace(" ", "").replace("\n", "")):
+                _resp = "(empty or whitespace only)"
+            elif isinstance(_resp, str) and len(_resp) > 80:
+                _resp = _resp[:80].replace("\n", " ") + "…"
+            logger.error("[EXTRACTION] Response that caused error: %s", _resp)
             return {}
 
 

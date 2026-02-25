@@ -569,11 +569,22 @@ async def _process_with_status_updates(case_id: str, session_id: str):
 
 @router.get("/status/{session_id}", response_model=SessionStatusResponse)
 async def get_session_status(session_id: str, db: Session = Depends(get_db)):
-    """Get current session status"""
+    """Get current session status. When case is processed by UM-Jobs, derive complete from Case.status."""
     session = upload_agent_service.get_session(db, session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    
+
+    processing_status = session.processing_status
+    processing_progress = session.processing_progress
+    # UM-Jobs updates Case.status to READY when done but does not update the session.
+    # Derive "complete" from Case so the UI gets acknowledgement on the next poll.
+    if session.case_id and processing_status != "complete":
+        case_row = db.query(Case).filter(Case.id == session.case_id).first()
+        if case_row and case_row.status == CaseStatus.READY:
+            processing_status = "complete"
+            processing_progress = 100
+            upload_agent_service.update_processing_status(db, session_id, "complete", 100, session.case_id)
+
     return SessionStatusResponse(
         session_id=session_id,
         state=ConversationStateEnum(session.state),
@@ -581,8 +592,8 @@ async def get_session_status(session_id: str, db: Session = Depends(get_db)):
         case_number=session.case_number,
         priority=session.priority,
         files=session.files,
-        processing_status=session.processing_status,
-        processing_progress=session.processing_progress,
+        processing_status=processing_status,
+        processing_progress=processing_progress,
         case_id=session.case_id
     )
 
