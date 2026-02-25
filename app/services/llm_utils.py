@@ -143,18 +143,40 @@ def extract_json_from_response(response: str) -> dict:
             except json.JSONDecodeError:
                 pass
 
-    # Extra recovery: LLM sometimes truncates as {"final{" or {"key": { (no content).
-    # Close the open string (key), add : null, then close braces. Try 1 and 2 closing braces
-    # because a "{" inside the key string shouldn't count as an open brace.
+    # Extra recovery — two sub-cases:
+    #
+    # Case A: response ends with a *closed* key string but no value.
+    #   e.g. '{"final{"'  → key is 'final{', value missing.
+    #   Appending '": null}' would produce '{"final{"": null}' (double-quote = invalid).
+    #   Instead append ': null}' → '{"final{": null}' which is valid JSON.
+    #
+    # Case B: response ends mid-key (open string), e.g. '{"final_ans'.
+    #   Close the string, add : null, then close braces.
     if first_brace != -1:
         truncated_trim = response[first_brace:].rstrip()
         open_brackets = max(0, truncated_trim.count("[") - truncated_trim.count("]"))
+
+        # Case A: last character is '"' — the key string is already closed.
+        if truncated_trim.endswith('"'):
+            for n_close in range(1, 4):
+                try:
+                    candidate = truncated_trim + ': null' + ']' * open_brackets + '}' * n_close
+                    recovered = json.loads(candidate)
+                    logger.warning(
+                        "Recovered closed-key JSON (appended ': null' + %d closers). First 200 chars: %s",
+                        n_close, original_response[:200],
+                    )
+                    return recovered
+                except json.JSONDecodeError:
+                    continue
+
+        # Case B: key string still open — close it, add : null, close braces.
         for n_close in range(1, 4):
             try:
-                candidate = truncated_trim + '": null' + "]" * open_brackets + "}" * n_close
+                candidate = truncated_trim + '": null' + ']' * open_brackets + '}' * n_close
                 recovered = json.loads(candidate)
                 logger.warning(
-                    "Recovered truncated JSON (appended ': null' + %d closers). First 200 chars: %s",
+                    "Recovered truncated JSON (appended '\" : null' + %d closers). First 200 chars: %s",
                     n_close, original_response[:200],
                 )
                 return recovered

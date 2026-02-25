@@ -347,11 +347,13 @@ class PresidioDeIdentificationService:
                     "spacy": "en_core_web_sm",
                     "transformers": model_name,
                 },
+                # Must be inside the model entry — Presidio's NlpEngineProvider passes
+                # labels_to_ignore to NerModelConfiguration at the per-model level, not
+                # at the top level.  Placing it at the top level is silently ignored,
+                # which is why the "Entity X is not mapped" warning persisted.
+                "labels_to_ignore": ["VENDOR", "PATORG", "HCW", "HOSP", "OTHERPHI"],
             }],
             "model_to_presidio_entity_mapping": ROBERTA_LABEL_TO_PRESIDIO,
-            # Suppress "Entity X is not mapped" warnings for labels that are
-            # intentionally mapped above but Presidio still warns about.
-            "labels_to_ignore": ["VENDOR", "PATORG", "HCW", "HOSP", "OTHERPHI"],
         }
 
         nlp_engine = NlpEngineProvider(nlp_configuration=nlp_config).create_engine()

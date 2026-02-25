@@ -764,17 +764,16 @@ Admission information, chief complaint, and hospital course.
             raise ValueError(f"System message not found for prompt_id: {prompt_id}. Please ensure the prompt exists in the database.")
 
         try:
-            # Determine provider for JSON format handling
+            # Determine provider for JSON format handling — done once, outside the retry loop.
             from app.services.llm.claude_service import ClaudeService
             from app.services.llm.openai_service import OpenAIService
-            from app.services.llm_utils import EXTRACTION_RULES
+            from app.services.llm_utils import EXTRACTION_RULES, extract_json_from_response
             is_claude = isinstance(llm_service, ClaudeService)
             is_openai = isinstance(llm_service, OpenAIService)
-            
+
             # Use centralized extraction instructions for BOTH providers
-            # This ensures consistent behavior and prevents duplicate extraction
             prompt_with_json = prompt + EXTRACTION_RULES
-            
+
             # Use provider-specific settings
             if is_claude:
                 max_tokens = settings.CLAUDE_MAX_TOKENS
@@ -782,84 +781,111 @@ Admission information, chief complaint, and hospital course.
             else:
                 max_tokens = settings.OPENAI_MAX_TOKENS
                 temperature = settings.OPENAI_TEMPERATURE
-            
-            response, usage = await llm_service.chat_completion(
-                messages=[
-                    {
-                        "role": "user",
-                        "content": prompt_with_json
-                    }
-                ],
-                system_message=system_message,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                response_format={"type": "json_object"} if not is_claude else None,
-                seed=settings.LLM_SEED if not is_claude else None  # OpenAI only - for reproducibility
-            )
 
-            # Track usage if user_id is available
-            if user_id and db:
+            # Retry up to 2 times when the LLM returns a garbage / truncated response.
+            # (e.g. '{"final{"' — 8 chars of corrupted output from the provider.)
+            _MAX_LLM_RETRIES = 2
+            last_response: str = ""
+            for attempt in range(_MAX_LLM_RETRIES + 1):
+                last_response = ""
                 try:
-                    from app.services.usage_tracking_service import usage_tracking_service
-                    # Get provider and model from service
-                    if is_claude:
-                        provider_name = "claude"
-                        model_name = getattr(llm_service, 'model', settings.CLAUDE_MODEL)
-                    elif is_openai:
-                        provider_name = "openai"
-                        model_name = getattr(llm_service, 'model', settings.OPENAI_MODEL)
-                    else:
-                        # Fallback
-                        provider_name = settings.LLM_PROVIDER.lower()
-                        model_name = settings.LLM_MODEL
-                    
-                    usage_tracking_service.track_llm_usage(
-                        db=db,
-                        user_id=user_id,
-                        provider=provider_name,
-                        model=model_name,
-                        operation_type=operation_type,
-                        prompt_tokens=usage.get("prompt_tokens", 0),
-                        completion_tokens=usage.get("completion_tokens", 0),
-                        total_tokens=usage.get("total_tokens", 0),
-                        case_id=case_id,
-                        extra_metadata={
-                            "operation": operation_type,
-                            "prompt_id": prompt_id
-                        }
+                    response, usage = await llm_service.chat_completion(
+                        messages=[
+                            {
+                                "role": "user",
+                                "content": prompt_with_json
+                            }
+                        ],
+                        system_message=system_message,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        response_format={"type": "json_object"} if not is_claude else None,
+                        seed=settings.LLM_SEED if not is_claude else None
                     )
-                except Exception as e:
-                    logger.warning(f"Failed to track usage: {e}", exc_info=True)
+                    last_response = response
 
-            from app.services.llm_utils import extract_json_from_response
-            result = extract_json_from_response(response)
-            
-            # Log extraction result for debugging
-            if isinstance(result, dict):
-                logger.debug(f"[EXTRACTION] LLM returned dict with keys: {list(result.keys())}")
-                # Log counts for each data type
-                counts = {
-                    "medications": len(result.get("medications", [])),
-                    "labs": len(result.get("labs", [])),
-                    "diagnoses": len(result.get("diagnoses", [])),
-                    "procedures": len(result.get("procedures", [])),
-                    "vitals": len(result.get("vitals", [])),
-                    "allergies": len(result.get("allergies", [])),
-                    "imaging": len(result.get("imaging", []))
-                }
-                logger.debug(f"[EXTRACTION] LLM extraction counts: {counts}")
-                
-                # If all are empty, log a warning with sample of response
-                if all(v == 0 for v in counts.values()):
-                    logger.debug(f"[EXTRACTION] LLM returned empty arrays for all data types or this is a specialized extraction")
-            else:
-                logger.warning(f"[EXTRACTION] LLM returned non-dict result: {type(result)}")
-            
-            return result
+                    # Suspiciously short — almost certainly truncated garbage.  Retry.
+                    if len(response.strip()) < 10:
+                        if attempt < _MAX_LLM_RETRIES:
+                            logger.warning(
+                                "[LLM] Response too short (%d chars) on attempt %d/%d, retrying: %r",
+                                len(response), attempt + 1, _MAX_LLM_RETRIES + 1, response,
+                            )
+                            continue
+
+                    result = extract_json_from_response(response)
+
+                    # Track usage only on a successful parse.
+                    if user_id and db:
+                        try:
+                            from app.services.usage_tracking_service import usage_tracking_service
+                            if is_claude:
+                                provider_name = "claude"
+                                model_name = getattr(llm_service, 'model', settings.CLAUDE_MODEL)
+                            elif is_openai:
+                                provider_name = "openai"
+                                model_name = getattr(llm_service, 'model', settings.OPENAI_MODEL)
+                            else:
+                                provider_name = settings.LLM_PROVIDER.lower()
+                                model_name = settings.LLM_MODEL
+
+                            usage_tracking_service.track_llm_usage(
+                                db=db,
+                                user_id=user_id,
+                                provider=provider_name,
+                                model=model_name,
+                                operation_type=operation_type,
+                                prompt_tokens=usage.get("prompt_tokens", 0),
+                                completion_tokens=usage.get("completion_tokens", 0),
+                                total_tokens=usage.get("total_tokens", 0),
+                                case_id=case_id,
+                                extra_metadata={
+                                    "operation": operation_type,
+                                    "prompt_id": prompt_id
+                                }
+                            )
+                        except Exception as e:
+                            logger.warning(f"Failed to track usage: {e}", exc_info=True)
+
+                    # Log extraction result for debugging
+                    if isinstance(result, dict):
+                        logger.debug(f"[EXTRACTION] LLM returned dict with keys: {list(result.keys())}")
+                        counts = {
+                            "medications": len(result.get("medications", [])),
+                            "labs": len(result.get("labs", [])),
+                            "diagnoses": len(result.get("diagnoses", [])),
+                            "procedures": len(result.get("procedures", [])),
+                            "vitals": len(result.get("vitals", [])),
+                            "allergies": len(result.get("allergies", [])),
+                            "imaging": len(result.get("imaging", []))
+                        }
+                        logger.debug(f"[EXTRACTION] LLM extraction counts: {counts}")
+                        if all(v == 0 for v in counts.values()):
+                            logger.debug(f"[EXTRACTION] LLM returned empty arrays for all data types or this is a specialized extraction")
+                    else:
+                        logger.warning(f"[EXTRACTION] LLM returned non-dict result: {type(result)}")
+
+                    return result
+
+                except ValueError as parse_err:
+                    if attempt < _MAX_LLM_RETRIES:
+                        logger.warning(
+                            "[LLM] JSON parse failed on attempt %d/%d (%s) — retrying. Response: %r",
+                            attempt + 1, _MAX_LLM_RETRIES + 1, parse_err, last_response[:100],
+                        )
+                        continue
+                    logger.error(
+                        f"[LLM] JSON parse failed after {_MAX_LLM_RETRIES + 1} attempts: {parse_err}",
+                        exc_info=True,
+                    )
+                    logger.error(f"[EXTRACTION] Response that caused error (first 500 chars): {last_response[:500]}")
+                    return {}
+
+            return {}
 
         except Exception as e:
             logger.error(f"LLM extraction error: {e}", exc_info=True)
-            logger.error(f"[EXTRACTION] Response that caused error (first 500 chars): {response[:500] if 'response' in locals() else 'N/A'}")
+            logger.error(f"[EXTRACTION] Response that caused error (first 500 chars): {last_response[:500] if 'last_response' in locals() else 'N/A'}")
             return {}
 
 
