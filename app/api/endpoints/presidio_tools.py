@@ -23,23 +23,21 @@ from app.utils.safe_logger import get_safe_logger
 router = APIRouter()
 safe_logger = get_safe_logger(__name__)
 
-# All entity types supported by Presidio
+# All entity types supported by Presidio (Standard + Custom)
 ALL_ENTITY_TYPES = [
-    "PERSON", "DATE_TIME", "PHONE_NUMBER", "US_SSN", "EMAIL_ADDRESS",
-    "LOCATION", "ORGANIZATION", "NRP", "CREDIT_CARD", "CRYPTO",
-    "IP_ADDRESS", "MEDICAL_LICENSE", "URL", "IBAN_CODE", "US_DRIVER_LICENSE",
-    "US_PASSPORT", "US_BANK_NUMBER", "US_ITIN", "AU_ABN", "AU_ACN",
-    "AU_TFN", "AU_MEDICARE", "SG_NRIC_FIN", "UK_NHS", "IN_PAN",
-    "IN_AADHAAR", "IN_VEHICLE_REGISTRATION",
+    "PERSON", "DATE_TIME", "PHONE_NUMBER", "SSN", "US_SSN", "EMAIL_ADDRESS",
+    "LOCATION", "ORGANIZATION", "IP_ADDRESS", "URL", "VEHICLE_PLATE", 
+    "PASSPORT", "DRIVERS_LICENSE", "US_DRIVER_LICENSE", "US_PASSPORT",
     "MRN", "TIME", "HOSPITAL", "PROVIDER", "PATIENT_FULL_NAME", "CITY", "AGE", "ID",
-    "STREET_ADDRESS", "ZIP_CODE", "NPI", "INSURANCE_ID",
+    "STREET_ADDRESS", "ZIP_CODE", "NPI", "INSURANCE_ID", "ACCOUNT_NUMBER", "PII",
 ]
 
-# Default entities for medical context
+# Default entities for medical context (The 18 Safe Harbor Identifiers)
 DEFAULT_MEDICAL_ENTITIES = [
-    "PERSON", "DATE_TIME", "PHONE_NUMBER", "US_SSN", "EMAIL_ADDRESS",
-    "LOCATION", "ORGANIZATION", "MRN", "TIME", "HOSPITAL", "PROVIDER", "PATIENT_FULL_NAME", "CITY",
-    "STREET_ADDRESS", "ZIP_CODE", "NPI", "INSURANCE_ID",
+    "PERSON", "DATE_TIME", "PHONE_NUMBER", "SSN", "US_SSN", "EMAIL_ADDRESS",
+    "LOCATION", "ORGANIZATION", "IP_ADDRESS", "URL", "VEHICLE_PLATE",
+    "PASSPORT", "DRIVERS_LICENSE", "MRN", "TIME", "HOSPITAL", "PROVIDER",
+    "STREET_ADDRESS", "ZIP_CODE", "NPI", "INSURANCE_ID", "ID", "ACCOUNT_NUMBER",
 ]
 
 
@@ -122,73 +120,99 @@ def analyze_text_advanced(request: AdvancedAnalyzeRequest):
             allow_list=allow_list,
         )
 
-        # Sort results by start position
-        results.sort(key=lambda r: r.start)
+        # ── Step 1.5: Sanitize and Resolve Overlaps (Production Hardening) ──
+        results = presidio_deidentification_service._sanitize_ner_results(results, text)
+        results = presidio_deidentification_service._resolve_overlapping_spans(results)
 
-        # ── Step 2: Handle denylist (force additional detections) ──
+        # ── Step 2: Safe Harbor Deterministic Detection (The 18 Identifiers) ──
+        # We enforce these via regex to guarantee Safe Harbor compliance as NER can miss them.
         denylist_results = []
+        
+        # 2a. Handle explicit user denylist
         if request.denylist:
             for deny_word in request.denylist:
-                if not deny_word.strip():
-                    continue
-                # Find all occurrences of deny word in text (case-insensitive)
+                if not deny_word.strip(): continue
                 pattern = re.compile(re.escape(deny_word), re.IGNORECASE)
                 for match in pattern.finditer(text):
-                    # Check if this span is already covered by existing results
-                    already_covered = any(
-                        r.start <= match.start() and r.end >= match.end()
-                        for r in results
-                    )
-                    if not already_covered:
+                    if not any(r.start <= match.start() and r.end >= match.end() for r in results):
                         denylist_results.append({
                             "entity_type": "CUSTOM_PII",
                             "text": text[match.start():match.end()],
-                            "start": match.start(),
-                            "end": match.end(),
-                            "score": 1.0,
-                            "explanation": f"Denylist match: '{deny_word}'",
+                            "start": match.start(), "end": match.end(), "score": 1.0,
+                            "explanation": f"Denylist: {deny_word}",
                         })
 
-        # ── Step 3: Format entity results ──
+        # 2b. High-confidence Safe Harbor Heuristics
+        safe_harbor_heuristics = [
+            ("SSN", r"\b\d{3}-\d{2}-\d{4}\b"),
+            ("IP_ADDRESS", r"\b(?:\d{1,3}\.){3}\d{1,3}\b"),
+            ("VEHICLE_PLATE", r"\b[A-Z]{2}-[A-Z]{2,4}-\d{4}\b"),
+            ("PASSPORT", r"\b[A-Z]\d{8,9}\b"),
+            ("DRIVERS_LICENSE", r"\b[A-Z]\d{6,8}\b"),
+        ]
+        
+        for entity_type, regex_pattern in safe_harbor_heuristics:
+            pattern = re.compile(regex_pattern, re.IGNORECASE)
+            for match in pattern.finditer(text):
+                # Check for overlap with existing high-quality results
+                if not any(not (r.end <= match.start() or r.start >= match.end()) for r in results):
+                    denylist_results.append({
+                        "entity_type": entity_type,
+                        "text": text[match.start():match.end()],
+                        "start": match.start(), "end": match.end(), "score": 1.0,
+                        "explanation": f"Deterministic Safe Harbor: {entity_type}",
+                    })
+
+        # ── Step 3: Canonicalize and Format ──
+        from app.services.presidio_deidentification_service import normalize_entity_type
+
+        # Merge results for normalization
+        final_results = []
+        for r in results:
+            r.entity_type = normalize_entity_type(r.entity_type)
+            final_results.append({
+                "entity_type": r.entity_type,
+                "text": text[r.start:r.end],
+                "start": r.start, "end": r.end, "score": r.score,
+                "explanation": str(r.analysis_explanation) if request.add_explanations and r.analysis_explanation else None
+            })
+            
+        for dr in denylist_results:
+            dr["entity_type"] = normalize_entity_type(dr["entity_type"])
+            final_results.append(dr)
+
+        # Resolve any new overlaps introduced by heuristics
+        # Prioritize longer spans in case of overlap
+        final_results.sort(key=lambda x: (x["end"] - x["start"]), reverse=True)
+        final_results_clean = []
+        for res in final_results:
+            # Check if this result overlaps with any already-accepted result
+            # If it does, and the accepted result is longer or equal, skip this one.
+            # If this one is longer, it will be added and potentially cover smaller ones later.
+            is_covered = False
+            for accepted_res in final_results_clean:
+                # Check for overlap: (start1 < end2 and end1 > start2)
+                if res["start"] < accepted_res["end"] and res["end"] > accepted_res["start"]:
+                    is_covered = True
+                    break
+            if not is_covered:
+                final_results_clean.append(res)
+        
+        final_results = sorted(final_results_clean, key=lambda x: x["start"])
+        
         entity_results = []
-        for i, res in enumerate(results):
-            explanation_str = None
-            if request.add_explanations and res.analysis_explanation:
-                explanation_str = str(res.analysis_explanation)
-
+        for i, res in enumerate(final_results):
             entity_results.append(EntityResult(
-                index=i + 1,
-                entity_type=res.entity_type,
-                text=text[res.start:res.end],
-                start=res.start,
-                end=res.end,
-                score=round(res.score, 4),
-                explanation=explanation_str,
+                index=i+1, entity_type=res["entity_type"], text=res["text"],
+                start=res["start"], end=res["end"], score=round(res["score"], 4),
+                explanation=res.get("explanation")
             ))
 
-        # Add denylist results
-        for j, dr in enumerate(denylist_results):
-            entity_results.append(EntityResult(
-                index=len(entity_results) + 1,
-                entity_type=dr["entity_type"],
-                text=dr["text"],
-                start=dr["start"],
-                end=dr["end"],
-                score=dr["score"],
-                explanation=dr["explanation"],
-            ))
-
-        # Re-sort by start position for consistent display
-        entity_results.sort(key=lambda e: e.start)
-        # Re-index
-        for idx, er in enumerate(entity_results):
-            er.index = idx + 1
-
-        # ── Step 4: De-identify text based on approach ──
+        # ── Step 4: De-identify text ──
         from presidio_anonymizer.entities import OperatorConfig
+        from presidio_analyzer import RecognizerResult
 
         approach = request.de_id_approach.lower()
-
         if approach == "redact":
             operators = {"DEFAULT": OperatorConfig("redact")}
         elif approach == "hash":
@@ -196,38 +220,27 @@ def analyze_text_advanced(request: AdvancedAnalyzeRequest):
         elif approach == "mask":
             operators = {"DEFAULT": OperatorConfig("mask", {"masking_char": "*", "chars_to_mask": 100, "from_end": False})}
         else:
-            # Default: replace with <ENTITY_TYPE>
             operators = {"DEFAULT": OperatorConfig("replace")}
 
-        # Combine Presidio results with denylist for anonymization
-        all_analyzer_results = list(results)
-
-        # For denylist items, create mock analyzer results for the anonymizer
-        if denylist_results:
-            from presidio_analyzer import RecognizerResult
-            for dr in denylist_results:
-                all_analyzer_results.append(
-                    RecognizerResult(
-                        entity_type=dr["entity_type"],
-                        start=dr["start"],
-                        end=dr["end"],
-                        score=dr["score"],
-                    )
-                )
+        # Create RecognizerResult objects for anonymizer
+        anonymizer_results = [
+            RecognizerResult(entity_type=r["entity_type"], start=r["start"], end=r["end"], score=r["score"])
+            for r in final_results
+        ]
 
         # ── SPECIAL HANDLING: Date Shifting vs Redaction ──
         # If date shifting is enabled (days != 0), we want to SHIFT dates, not redact them.
         # So we filter out DATE_TIME entities from the anonymizer list.
         # They will be handled in Step 5 by the regex-based shifter.
         if request.date_shift_days != 0:
-            all_analyzer_results = [
-                r for r in all_analyzer_results 
+            anonymizer_results = [
+                r for r in anonymizer_results 
                 if r.entity_type != "DATE_TIME"
             ]
 
         anonymized = presidio_deidentification_service.anonymizer.anonymize(
             text=text,
-            analyzer_results=all_analyzer_results,
+            analyzer_results=anonymizer_results,
             operators=operators,
         )
         de_identified_text = anonymized.text
@@ -383,13 +396,14 @@ def pipeline_preview(
         }
 
         # Format token map for display (reverse: original → token)
+        # Token format is [[TYPE-NN]], e.g. [[PERSON-01]], [[ORGANIZATION-02]]
         display_token_map = []
         for token, original in token_map.items():
             entity_type = "UNKNOWN"
-            if "::" in token:
-                parts = token.replace("[[", "").replace("]]", "").split("::")
-                if len(parts) >= 1:
-                    entity_type = parts[0]
+            # Strip [[ and ]] then split on the last hyphen to separate TYPE from counter
+            inner = token.replace("[[", "").replace("]]", "")  # e.g. "PERSON-01"
+            if "-" in inner:
+                entity_type = inner.rsplit("-", 1)[0]  # e.g. "PERSON"
             display_token_map.append({
                 "original": original,
                 "token": token,
@@ -436,10 +450,10 @@ def get_case_redactions(
     if vault_entry.token_map:
         for token, original in vault_entry.token_map.items():
             entity_type = "UNKNOWN"
-            if "::" in token:
-                parts = token.replace("[[", "").replace("]]", "").split("::")
-                if len(parts) >= 1:
-                    entity_type = parts[0]
+            # Token format is [[TYPE-NN]], e.g. [[PERSON-01]]
+            inner = token.replace("[[", "").replace("]]", "")  # e.g. "PERSON-01"
+            if "-" in inner:
+                entity_type = inner.rsplit("-", 1)[0]  # e.g. "PERSON"
             mapping.append({
                 "original": original,
                 "token": token,

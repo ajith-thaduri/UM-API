@@ -13,6 +13,13 @@ Policy:
 > False positives result in safe degradation (template-based summary) rather
 > than retry or override. This ensures fail-closed behavior while maintaining
 > service availability.
+
+NER Engine:
+  Uses the SAME Stanford AIMI (StanfordAIMI/stanford-deidentifier-base) model
+  as the production de-identification scrubber.  Using a different model (e.g.
+  spaCy) would mean the validator's "brain" does not match the scrubber, leading
+  to inconsistent PHI detection.  A failure to load this model is a hard error —
+  the service will not start in a degraded state.
 """
 
 import json
@@ -41,24 +48,70 @@ class PHILeakageError(Exception):
     pass
 
 
+# Stanford AIMI model — same model locked in the scrubber.  Both must share
+# the same NER brain so they agree on what is and is not PHI.
+_STANFORD_MODEL = "StanfordAIMI/stanford-deidentifier-base"
+
+# Label mapping reused from the scrubber (keeps both in sync)
+_ROBERTA_LABEL_TO_PRESIDIO = {
+    "PATIENT": "PERSON",
+    "STAFF": "PERSON",
+    "HCW": "PERSON",
+    "AGE": "AGE",
+    "DATE": "DATE_TIME",
+    "PHONE": "PHONE_NUMBER",
+    "EMAIL": "EMAIL_ADDRESS",
+    "ID": "ID",
+    "HOSP": "ORGANIZATION",
+    "HOSPITAL": "ORGANIZATION",
+    "VENDOR": "ORGANIZATION",
+    "PATORG": "ORGANIZATION",
+    "LOC": "LOCATION",
+    "OTHERPHI": "NRP",
+}
+
+
 class PHIValidator:
-    """Pre-flight validator: fail-closed safety net before Tier 2"""
+    """Pre-flight validator: fail-closed safety net before Tier 2.
+
+    Always uses the Stanford AIMI RoBERTa model — the same model as the
+    production de-identification scrubber — so both use the same detection
+    logic.  If the model cannot be loaded the service raises RuntimeError and
+    refuses to start; cases will not be processed with a weaker validator.
+    """
 
     def __init__(self):
         self.analyzer = None
         if PRESIDIO_AVAILABLE:
+            # Hard failure — validator MUST use the same NER model as the
+            # scrubber.  Silent downgrade to string-only checks is forbidden.
+            nlp_config = {
+                "nlp_engine_name": "transformers",
+                "models": [{
+                    "lang_code": "en",
+                    "model_name": {
+                        "spacy": "en_core_web_sm",
+                        "transformers": _STANFORD_MODEL,
+                    },
+                    "labels_to_ignore": ["VENDOR", "PATORG", "HCW", "HOSP", "OTHERPHI"],
+                }],
+                "model_to_presidio_entity_mapping": _ROBERTA_LABEL_TO_PRESIDIO,
+            }
             try:
-                # Initialize Presidio with high-sensitivity configuration
-                nlp_config = {
-                    "nlp_engine_name": "spacy",
-                    "models": [{"lang_code": "en", "model_name": "en_core_web_lg"}],
-                }
                 provider = NlpEngineProvider(nlp_configuration=nlp_config)
                 nlp_engine = provider.create_engine()
                 self.analyzer = AnalyzerEngine(nlp_engine=nlp_engine)
-                safe_logger.info("PHIValidator initialized with Presidio")
+                safe_logger.info(
+                    f"PHIValidator initialised with Stanford AIMI ({_STANFORD_MODEL})"
+                )
             except Exception as e:
-                safe_logger.error(f"Failed to initialize Presidio: {e}")
+                safe_logger.error(
+                    f"PHIValidator FAILED to load Stanford AIMI model: {e}. "
+                    "Pre-flight validation is unavailable — refusing to start."
+                )
+                raise RuntimeError(
+                    f"PHIValidator cannot initialise the Stanford AIMI NER engine: {e}"
+                ) from e
 
     def validate_payload(
         self,
@@ -175,6 +228,11 @@ class PHIValidator:
             if allow_tokens:
                 results = self._filter_tokens(results, text)
 
+            # Apply same NER quality filters as main de-id pipeline
+            # (ZIP/phone disambiguation, street-date fusion, suffix-only spans, etc.)
+            from app.services.presidio_deidentification_service import presidio_deidentification_service
+            results = presidio_deidentification_service._sanitize_ner_results(results, text)
+
             # Convert to dict for logging
             findings = []
             for result in results:
@@ -184,8 +242,13 @@ class PHIValidator:
                         "score": result.score,
                         "start": result.start,
                         "end": result.end,
+                        "text": text[result.start:result.end],
                     }
                 )
+            
+            if findings:
+                labels = [f"{f['entity_type']}:{repr(f.get('text','')[:20])}" for f in findings]
+                safe_logger.warning(f"Pre-flight residual PHI: {labels}")
 
             return findings
 
@@ -196,23 +259,39 @@ class PHIValidator:
 
     def _filter_tokens(self, results: List, text: str) -> List:
         """
-        Filter out UUID tokens from Presidio results.
+        Filter out system de-identification tokens from Presidio results.
 
-        Tokens like [[PERSON::a94f2c3b12ef]] are intentional and should not
-        be flagged as PHI.
+        The scrubber generates tokens in the format [[TYPE-NN]], e.g.
+            [[PERSON-01]], [[ID-02]], [[ORGANIZATION-01]]
+
+        Any detected entity whose span is fully inside one of these tokens
+        must be excluded — they are intentional placeholders, not real PHI.
+
+        Previous implementation used the pattern [[TYPE::hexchars]] which
+        did NOT match the actual counter-based format, causing the validator
+        to incorrectly flag its own tokens as PHI and permanently block
+        every case from reaching Tier 2 (fail-closed infinite loop).
         """
-        # Token pattern: [[TYPE::uuid12]]
-        token_pattern = r"\[\[[A-Z_]+::[a-f0-9]{8,16}\]\]"
+        # Correct token pattern: [[UPPERCASE_TYPE-NN]] where NN is 01..99
+        # Examples: [[PERSON-01]], [[ORGANIZATION-03]], [[DATE_TIME-01]]
+        token_pattern = re.compile(r"\[\[[A-Z_]+-\d{2,}\]\]")
 
         filtered = []
         for result in results:
-            # Extract the detected text
             start, end = result.start, result.end
             detected_text = text[start:end]
 
-            # Check if it's a token
-            if re.match(token_pattern, detected_text):
-                continue  # Skip tokens
+            # Discard if the detected span IS a system token
+            if token_pattern.fullmatch(detected_text.strip()):
+                continue
+
+            # Also discard if the detected span is INSIDE a system token
+            # (e.g. Presidio detects "PERSON" within "[[PERSON-01]]")
+            context_start = max(0, start - 3)
+            context_end = min(len(text), end + 3)
+            context = text[context_start:context_end]
+            if token_pattern.search(context):
+                continue
 
             filtered.append(result)
 

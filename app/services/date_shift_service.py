@@ -23,6 +23,8 @@ DATE_PATTERNS = [
     (re.compile(r"\b\d{1,2}/\d{1,2}/\d{4}\b"), None),
     (re.compile(r"\b\d{1,2}-\d{1,2}-\d{4}\b"), None),
     (re.compile(r"\b\d{1,2}/\d{1,2}/\d{2}\b"), None),
+    (re.compile(r"\b\d{1,2}-\d{1,2}-\d{2}\b"), None),
+    (re.compile(r"\b\d{4}/\d{1,2}/\d{1,2}\b"), None),
 ]
 
 

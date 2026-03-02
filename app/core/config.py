@@ -229,8 +229,8 @@ class Settings(BaseSettings):
         "LOCATION",
         "ORGANIZATION",
     ]
-    PRESIDIO_FREE_TEXT_THRESHOLD: float = 0.9  # Required by compliance: only redact if confidence >= 0.9
-    PRESIDIO_PREFLIGHT_THRESHOLD: float = 0.9  # Ultra-sensitive for pre-flight validation
+    PRESIDIO_FREE_TEXT_THRESHOLD: float = 0.90  # High threshold: low FP is preferred over high recall
+    PRESIDIO_PREFLIGHT_THRESHOLD: float = 0.90  # Match free-text for consistency
     
     # Token Format (UUID12 = 48 bits, ~281 trillion combinations)
     # This minimizes collision risk even at multi-million entity scale

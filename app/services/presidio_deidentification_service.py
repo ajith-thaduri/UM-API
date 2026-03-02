@@ -57,7 +57,14 @@ from app.services.presidio_recognizers import (
     StreetRecognizer,
     ZipRecognizer,
     NPIRecognizer,
-    InsuranceRecognizer
+    InsuranceRecognizer,
+    SSNRecognizer,
+    EmergencyContactRecognizer,
+    AccountRecognizer,
+    IPRecognizer,
+    VehiclePlateRecognizer,
+    PassportRecognizer,
+    DriversLicenseRecognizer
 )
 from app.utils.safe_logger import get_safe_logger
 from presidio_anonymizer.entities import OperatorConfig
@@ -91,6 +98,8 @@ ROBERTA_LABEL_TO_PRESIDIO = {
     "VENDOR": "ORGANIZATION",    # Stanford label
     "PATORG": "ORGANIZATION",
     "LOC": "LOCATION",
+    "IP": "PII",                 # IP addresses
+    "URL": "PII",                # URLs/Websites
     "OTHERPHI": "NRP",
 }
 
@@ -98,32 +107,127 @@ ROBERTA_LABEL_TO_PRESIDIO = {
 # Normalizes medical-specific entity types to standard Presidio types
 # This ensures consistent tokenization (e.g., "John Doe" always becomes [[PERSON-01]])
 ENTITY_TYPE_NORMALIZATION = {
+    # --- Unified Person Category ---
+    "PATIENT": "PERSON",
     "PATIENT_FULL_NAME": "PERSON",
+    "PERSON": "PERSON",
     "PROVIDER": "PERSON",
     "DOCTOR": "PERSON",
     "STAFF": "PERSON",
     "HCW": "PERSON",
+    "USER": "PERSON",
+    "EMERGENCY_CONTACT": "PERSON",
+    
+    # --- Unified Organization Category ---
     "HOSPITAL": "ORGANIZATION",
     "HOSP": "ORGANIZATION",
+    "FACILITY": "ORGANIZATION",
+    "CLINIC": "ORGANIZATION",
+    "PHARMACY": "ORGANIZATION",
     "VENDOR": "ORGANIZATION",
     "PATORG": "ORGANIZATION",
+    "ORGANIZATION": "ORGANIZATION",
+    
+    # --- Unified ID Category ---
+    "MRN": "ID",
+    "NPI": "ID",
+    "SSN": "ID",
+    "US_SSN": "ID",
+    "INSURANCE_ID": "ID",
+    "POLICY_NUMBER": "ID",
+    "ACCOUNT_NUMBER": "ID",
+    "PASSPORT": "ID",
+    "DRIVERS_LICENSE": "ID",
+    "VEHICLE_PLATE": "ID",
+    "DEVICE_ID": "ID",
+    "NATIONAL_ID": "ID",
+    "ID": "ID",
+    
+    # --- Unified Location Category ---
     "STREET_ADDRESS": "LOCATION",
     "CITY": "LOCATION",
     "ZIP_CODE": "LOCATION",
-    "MRN": "ID",
-    "NPI": "ID",
-    "INSURANCE_ID": "ID",
-    "SEX": "AGE",
-    "TIME": "DATE_TIME",
-    # Standard types pass through unchanged
-    "PERSON": "PERSON",
-    "ORGANIZATION": "ORGANIZATION",
     "LOCATION": "LOCATION",
-    "DATE_TIME": "DATE_TIME",
-    "ID": "ID",
-    "AGE": "AGE",
+    "ADDRESS": "LOCATION",
+    
+    # --- Unified Communication/Internet Category ---
     "PHONE_NUMBER": "PHONE_NUMBER",
+    "FAX": "PHONE_NUMBER",
     "EMAIL_ADDRESS": "EMAIL_ADDRESS",
+    "IP_ADDRESS": "IP_ADDRESS",
+    "URL": "PII",
+    "WEBSITE": "PII",
+    
+    # --- Other Categories ---
+    "DATE_TIME": "DATE_TIME",
+    "TIME": "DATE_TIME",
+    "AGE": "AGE",
+    "SEX": "AGE",
+}
+
+# --- NER False Positive Block-list ---
+# ONLY contains medical/structural header labels that NER incorrectly labels as PERSON/ORG.
+# Do NOT add identifier category names (passport, license, plate) — those are field labels,
+# not identifier VALUES. Adding category names would block real PHI values like 'X12345678'.
+NER_BLOCKLIST = {
+    "patient name", "patient", "name", "admission date", "discharge date",
+    "medical record", "mrn", "case number", "account number", "health plan",
+    "npi", "provider", "doctor", "staff", "attending", "emergency contact",
+    "secondary email", "alias", "alias used", "prior records", "result", "flag", "test",
+    "findings", "chest", "result flag", "date test", "physician", "date of birth",
+    "dob", "ssn", "social security",
+    "policy number", "group number", "health plan id", "case number", "admission",
+    "discharge", "medical record number", "mrn number", "patient info",
+}
+
+# --- NER Quality Validation ---
+
+# Strict US phone number pattern — 5-digit ZIPs will never match
+_PHONE_REGEX = re.compile(
+    r'^\(?\d{3}\)?[-. ]?\d{3}[-. ]?\d{4}$'
+)
+
+# Valid street address: must START with a digit and END with a street suffix keyword
+_STREET_REGEX = re.compile(
+    r'^\d{1,6}\s+(?:[A-Za-z0-9]+\s+){0,5}'
+    r'(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|'
+    r'Drive|Dr|Terrace|Way|Court|Ct|Circle|Cir|Place|Pl|'
+    r'Highway|Hwy|Parkway|Pkwy)\b',
+    re.IGNORECASE
+)
+
+# Words that indicate a clinical narrative falsely detected as a street address
+_CLINICAL_CONTEXT_WORDS = {
+    "under", "care", "patient", "admitted", "discharged",
+    "presented", "history", "physician", "services"
+}
+
+# Maximum character span length before we consider it a multi-name block
+_MAX_ENTITY_SPAN = 50
+
+# Minimum meaningful token length (chars in the stripped span)
+_MIN_ENTITY_CHARS = 3
+
+# Regex to detect honorific / credential suffix spans that are NOT standalone persons
+# e.g.  ', MD'  '(MD)'  'MD'  'DO'  'PhD'  'NP'
+_SUFFIX_ONLY_REGEX = re.compile(
+    r'^[,()\s]*(?:MD|DO|PhD|NP|PA|RN|LPN|FNP|DNP|JD|MSW|LCSW)[.,()\s]*$',
+    re.IGNORECASE
+)
+
+# --- Clinical Relevance Tiers ---
+
+# Entity types that get numbered tokens (AI needs to distinguish these)
+TOKENIZE_TYPES = {"PERSON", "ORGANIZATION"}
+
+# Entity types stripped to [[REDACTED]] (zero clinical value for summary)
+STRIP_TYPES = {
+    "ID", "PHONE_NUMBER", "EMAIL_ADDRESS", "US_SSN", "SSN",
+    "LOCATION", "IP_ADDRESS", "URL", "PII", "ADDRESS",
+    "INSURANCE_ID", "NPI", "MRN", "PASSPORT", "AGE",
+    "DRIVERS_LICENSE", "DEVICE_ID", "VEHICLE_PLATE",
+    "ACCOUNT_NUMBER", "FAX", "NATIONAL_ID", "WEBSITE",
+    "ZIP_CODE", "STREET_ADDRESS", "CITY",
 }
 
 
@@ -184,20 +288,16 @@ FREE_TEXT_FIELDS = {
 # Ensures custom medical entities win over generic NER labels
 ENTITY_PRIORITY = {
     "PROVIDER": 100,
-    "PROVIDER": 100,
     "NPI": 95,
     "INSURANCE_ID": 92,
     "PATIENT_FULL_NAME": 90,
-    "PATIENT_FULL_NAME": 90,
+    "SSN": 98,
+    "IP_ADDRESS": 95,
     "MRN": 85,
     "STREET_ADDRESS": 82,
     "CITY": 80,
     "ZIP_CODE": 78,
     "HOSPITAL": 75,
-    "SEX": 70,
-    "AGE": 65,
-    "TIME": 60,
-    "DATE_TIME": 55,
     "PERSON": 50,
     "LOCATION": 45,
     "ORGANIZATION": 40,
@@ -236,7 +336,14 @@ class PresidioDeIdentificationService:
             StreetRecognizer,
             ZipRecognizer,
             NPIRecognizer,
-            InsuranceRecognizer
+            InsuranceRecognizer,
+            IPRecognizer,
+            SSNRecognizer,
+            EmergencyContactRecognizer,
+            AccountRecognizer,
+            VehiclePlateRecognizer,
+            PassportRecognizer,
+            DriversLicenseRecognizer
         ]
 
         if PRESIDIO_AVAILABLE:
@@ -507,9 +614,10 @@ class PresidioDeIdentificationService:
 
         # Step 1: Generate date shift offset
         shift_days = random.randint(
-            getattr(settings, "DATE_SHIFT_MIN_DAYS", 0),
+            getattr(settings, "DATE_SHIFT_MIN_DAYS", 1), # Force at least 1 day for testing
             getattr(settings, "DATE_SHIFT_MAX_DAYS", 30),
         )
+        safe_logger.info(f"Generated shift_days={shift_days} for case {case_id}")
 
         # Step 2: Collect known PHI (deterministic) 
         known_phi = self._collect_known_phi(patient_name, case_metadata)
@@ -539,30 +647,27 @@ class PresidioDeIdentificationService:
 
         # Step 6: Presidio scan on free-text fields (catches leaks)
         de_id_clinical_data = self._presidio_scan_free_text(
-            de_id_clinical_data, token_map
+            de_id_clinical_data, token_map, shift_days=shift_days, score_threshold=score_threshold
         )
-        de_id_timeline = self._presidio_scan_free_text(de_id_timeline, token_map)
-        de_id_red_flags = self._presidio_scan_free_text(de_id_red_flags, token_map)
+        de_id_timeline = self._presidio_scan_free_text(
+            de_id_timeline, token_map, shift_days=shift_days, score_threshold=score_threshold
+        )
+        de_id_red_flags = self._presidio_scan_free_text(
+            de_id_red_flags, token_map, shift_days=shift_days, score_threshold=score_threshold
+        )
 
         # Step 6.5: De-identify document chunks (if provided)
         de_id_chunks = []
         if document_chunks:
             safe_logger.info(f"De-identifying {len(document_chunks)} document chunks for case {case_id}")
             for i, chunk_text in enumerate(document_chunks):
-                # Replace known PHI tokens
-                de_id_chunk_text = chunk_text
-                for token, original_value in token_map.items():
-                    de_id_chunk_text = re.sub(
-                        r'\b' + re.escape(original_value) + r'\b',
-                        token,
-                        de_id_chunk_text,
-                        flags=re.IGNORECASE
-                    )
-                
-                # Shift dates in chunk text
+                # Apply the generic string replacement logic
+                de_id_chunk_text = self._replace_in_string(chunk_text)
+
+                # Shift dates in chunk text (regex first)
                 de_id_chunk_text = self._shift_dates_in_text(de_id_chunk_text, shift_days)
                 
-                # Presidio scan to catch any remaining PHI
+                # Presidio scan to catch any residual PHI not in the known map
                 if self.analyzer:
                     analyzed = self.analyzer.analyze(
                         text=de_id_chunk_text,
@@ -570,13 +675,17 @@ class PresidioDeIdentificationService:
                         score_threshold=score_threshold
                     )
                     
-                    # Replace detected entities with tokens
+                    # Filter already tokenized spans
+                    analyzed = [res for res in analyzed if "[[" not in de_id_chunk_text[res.start:res.end]]
+                    
                     if analyzed:
-                        de_id_chunk_text = self.anonymizer.anonymize(
-                            text=de_id_chunk_text,
-                            analyzer_results=analyzed,
-                            operators={"DEFAULT": OperatorConfig("replace", {"new_value": "[[REDACTED]]"})}
-                        ).text
+                        # For residual PHI: 
+                        # - If TOKENIZE type -> create new token
+                        # - If DATE_TIME -> shift
+                        # - If STRIP type -> [[REDACTED]]
+                        de_id_chunk_text = self._process_residual_phi_in_string(
+                            de_id_chunk_text, analyzed, token_map, shift_days, score_threshold
+                        )
                 
                 de_id_chunks.append(de_id_chunk_text)
             
@@ -662,56 +771,116 @@ class PresidioDeIdentificationService:
 
     def _collect_known_phi(
         self, patient_name: str, case_metadata: Dict
-    ) -> Dict[str, str]:
+    ) -> Dict[str, Any]:
         """
-        Collect known PHI values from inputs.
-
-        Returns Dict mapping PHI value → entity type
+        Collect known PHI values and group them by 'identity'.
+        
+        Industry-level strategy:
+        1. STRIP: Emails, Phones, MRNs, SSNs -> [[REDACTED]]
+        2. TOKENIZE: Person names, Orgs -> [[PERSON-NN]], [[ORGANIZATION-NN]]
+        
+        Returns a dict containing:
+            'strips': List of strings to be redacted
+            'identities': List of dicts {type: str, canonical: str, variants: List[str]}
         """
-        known_phi = {}
+        case_metadata = case_metadata or {}
+        strips = set()
+        identities = []
 
-        # Patient name
+        # --- 1. PERSON: Patient ---
         if patient_name:
-            known_phi[patient_name] = "PERSON"
-            # Also tokenize first/last name separately to avoid substring issues
-            name_parts = patient_name.split()
-            if len(name_parts) >= 2:
-                known_phi[name_parts[0]] = "PERSON"  # First name
-                known_phi[name_parts[-1]] = "PERSON"  # Last name
+            patient_identity = {"type": "PERSON", "canonical": patient_name, "variants": set()}
+            
+            # 1a. Split canonical name into parts
+            parts = patient_name.split()
+            if len(parts) >= 2:
+                for p in parts:
+                    if len(p) > 2: patient_identity["variants"].add(p)
+            
+            # 1b. Add alias and its parts
+            alias = case_metadata.get("Alias Used in Prior Records") or case_metadata.get("alias")
+            if alias:
+                patient_identity["variants"].add(alias)
+                for a_part in alias.split():
+                    if len(a_part) > 2: patient_identity["variants"].add(a_part)
+                # Full variant combinations (Best effort)
+                if len(parts) > 0:
+                    patient_identity["variants"].add(f"{parts[0]} {alias}")
+                    patient_identity["variants"].add(f"{alias} {parts[-1]}")
+            
+            patient_identity["variants"] = list(patient_identity["variants"])
+            identities.append(patient_identity)
 
-        # Case number (based on policy)
-        if getattr(settings, "TREAT_CASE_NUMBER_AS_PHI", True):
-            case_number = case_metadata.get("case_number")
-            if case_number:
-                known_phi[str(case_number)] = "ID"
-
-        # Facility
-        facility = case_metadata.get("facility") or case_metadata.get("facility_name")
-        if facility:
-            known_phi[facility] = "ORGANIZATION"
-
-        # Provider (if available)
+        # --- 2. PERSON: Provider ---
         provider = case_metadata.get("provider") or case_metadata.get("provider_name")
         if provider:
-            known_phi[provider] = "PERSON"
+            provider_identity = {"type": "PERSON", "canonical": provider, "variants": set()}
+            parts = provider.replace("Dr.", "").replace("Doctor", "").split()
+            for p in parts:
+                if len(p) > 2:
+                    provider_identity["variants"].add(p)
+            provider_identity["variants"] = list(provider_identity["variants"])
+            identities.append(provider_identity)
 
-        safe_logger.info(f"Collected {len(known_phi)} known PHI values")
-        return known_phi
+        # --- 3. PERSON: Emergency Contact ---
+        ec_name = case_metadata.get("emergency_contact_name") or case_metadata.get("emergency_contact")
+        if ec_name:
+            ec_identity = {"type": "PERSON", "canonical": ec_name, "variants": set()}
+            parts = ec_name.split()
+            for p in parts:
+                if len(p) > 2:
+                    ec_identity["variants"].add(p)
+            ec_identity["variants"] = list(ec_identity["variants"])
+            identities.append(ec_identity)
 
-    def _generate_tokens(self, known_phi: Dict[str, str]) -> Dict[str, str]:
+        # --- 4. ORGANIZATION: Facility ---
+        facility = case_metadata.get("facility") or case_metadata.get("facility_name")
+        if facility:
+            identities.append({"type": "ORGANIZATION", "canonical": facility, "variants": []})
+
+        # --- 5. STRIP: PII with zero clinical value ---
+        strip_fields = [
+            "mrn", "ssn", "case_number", "phone", "email", 
+            "address", "zip", "city", "state", "insurance_id", "npi",
+            "account_number", "health_plan_id", "dob",
+            "passport", "license", "vehicle_plate",
+            "SSN", "Medical Record Number (MRN)", "Case Number",
+            "Health Plan ID", "Account Number", "NPI (Attending)"
+        ]
+        for field in strip_fields:
+            val = case_metadata.get(field)
+            if val:
+                strips.add(str(val))
+        
+        # Also check common variations
+        for k, v in case_metadata.items():
+            k_lower = k.lower()
+            if any(x in k_lower for x in ["email", "phone", "mobile", "home", "fax"]):
+                if v: strips.add(str(v))
+
+        safe_logger.info(f"Collected {len(identities)} identities and {len(strips)} strip values")
+        return {
+            "identities": identities,
+            "strips": list(strips)
+        }
+
+    def _generate_tokens(self, data_groups: Dict[str, Any]) -> Dict[str, str]:
         """
-        Generate unique counter-based tokens (e.g., [[PERSON-01]]) for known PHI.
-
-        Returns Dict mapping token → original value (reverse of known_phi)
+        Generate unique counter-based tokens based on identity groups.
+        
+        Returns token_map: token -> canonical_value
         """
         token_map = {}
-        # Track counters per entity type
         counters = {}
+        
+        # We also need a local variant_map for replacement, but it's not stored in vault
+        self._variant_token_map = {}
+        self._strip_list = data_groups.get("strips", [])
 
-        # Sorting ensures deterministic assignment order
-        for phi_value, raw_entity_type in sorted(known_phi.items()):
-            # Normalize before tokenization
-            entity_type = normalize_entity_type(raw_entity_type)
+        for group in data_groups.get("identities", []):
+            entity_type = group["type"]
+            canonical = group["canonical"]
+            variants = group.get("variants", [])
             
             # Increment counter for this type
             current_count = counters.get(entity_type, 0) + 1
@@ -719,44 +888,92 @@ class PresidioDeIdentificationService:
             
             # Format: [[TYPE-01]]
             token = f"[[{entity_type}-{current_count:02d}]]"
+            
+            # Store in vault map
+            token_map[token] = canonical
+            
+            # Store in replacement map
+            self._variant_token_map[canonical] = token
+            for v in variants:
+                # If variant is already mapped (e.g. 'Michael' in both patient and provider),
+                # first one wins (usually patient).
+                if v not in self._variant_token_map:
+                    self._variant_token_map[v] = token
 
-            # Store mapping (token → original)
-            token_map[token] = phi_value
-
-        safe_logger.info(f"Generated {len(token_map)} counter tokens")
+        safe_logger.info(f"Generated {len(token_map)} counter tokens for groups")
         return token_map
 
     def _replace_known_phi(self, data: Any, token_map: Dict[str, str]) -> Any:
         """
-        Recursively replace known PHI values with tokens in structured data.
-
-        This is DETERMINISTIC - we replace exact values, not using Presidio.
+        Recursively replace known PHI values with tokens/redaction in structured data.
         """
         if isinstance(data, dict):
-            result = {}
-            for key, value in data.items():
-                # Recursively process nested structures
-                result[key] = self._replace_known_phi(value, token_map)
-            return result
-
+            return {k: self._replace_known_phi(v, token_map) for k, v in data.items()}
         elif isinstance(data, list):
             return [self._replace_known_phi(item, token_map) for item in data]
-
         elif isinstance(data, str):
-            # Replace all known PHI values in this string
-            result = data
-            for token, original_value in token_map.items():
-                # Use whole-word replacement to avoid partial matches
-                result = re.sub(
-                    r'\b' + re.escape(original_value) + r'\b',
-                    token,
-                    result,
-                    flags=re.IGNORECASE
-                )
-            return result
+            return self._replace_in_string(data)
+        return data
 
-        else:
-            return data
+    def _replace_in_string(self, text: str) -> str:
+        """
+        Industry-level replacement strategy:
+        1. HEURISTIC STRIP: Emails, URLs, Phones (regex) -> [[REDACTED]]
+        2. KNOWN STRIP: MRN, SSN, explicitly provided PII -> [[REDACTED]]
+        3. IDENTITIES: Replace names with [[PERSON-NN]] tokens (longest-first)
+        """
+        if not text:
+            return text
+            
+        result = text
+        
+        # --- Stage 1: Heuristic Regex Strip (High confidence PII) ---
+        # This fixes the bug where name parts corrupt emails/URLs
+        
+        # Emails
+        result = re.sub(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', "[[REDACTED]]", result)
+        # URLs
+        result = re.sub(r'https?://[^\s<>"]+|www\.[^\s<>"]+', "[[REDACTED]]", result)
+        # Phone numbers (US-centric)
+        result = re.sub(r'\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}', "[[REDACTED]]", result)
+        
+        # --- HIPAA Hardening: Additional Safe Harbor Identifiers ---
+        # SSN
+        result = re.sub(r'\b\d{3}-\d{2}-\d{4}\b', "[[REDACTED]]", result)
+        # IPv4
+        result = re.sub(r'\b(?:\d{1,3}\.){3}\d{1,3}\b', "[[REDACTED]]", result)
+        # Vehicle Plates (common format)
+        result = re.sub(r'\b[A-Z]{2}-[A-Z]{2,4}-\d{4}\b', "[[REDACTED]]", result)
+        # Passport / Driver's License (Contextual fallback)
+        result = re.sub(r'\b(?:Passport|License|DL)[:\s]*[A-Z]\d{6,9}\b', "[[REDACTED]]", result, flags=re.I)
+        
+        # --- Stage 2: Known PHI / Identity Replacement ---
+        replacements = []
+        
+        # Add strips -> [[REDACTED]]
+        for s in self._strip_list:
+            if s and len(s) > 3:
+                replacements.append((s, "[[REDACTED]]"))
+                
+        # Add identity variants -> [[TYPE-NN]]
+        for val, token in self._variant_token_map.items():
+            if val and len(val) > 2:
+                replacements.append((val, token))
+                
+        # Sort by length DESCENDING
+        replacements.sort(key=lambda x: len(x[0]), reverse=True)
+        
+        for original, target in replacements:
+            # Skip if we already replaced this area via Stage 1
+            if original in result:
+                # Use literal replacement for strips to be safe (IDs/Codes)
+                if target == "[[REDACTED]]":
+                    result = re.sub(re.escape(original), target, result, flags=re.IGNORECASE)
+                else:
+                    # Word boundary for names/identities to avoid partial matches
+                    result = re.sub(r'\b' + re.escape(original) + r'\b', target, result, flags=re.IGNORECASE)
+                
+        return result
 
     def _shift_dates_structured(
         self, data: Any, shift_days: int, path: str = ""
@@ -795,6 +1012,9 @@ class PresidioDeIdentificationService:
                     for i, item in enumerate(obj)
                 ]
 
+            elif isinstance(obj, str):
+                return self._shift_dates_in_text(obj, shift_days)
+
             else:
                 return obj
 
@@ -823,18 +1043,18 @@ class PresidioDeIdentificationService:
             return date_str
 
     def _presidio_scan_free_text(
-        self, data: Any, token_map: Dict[str, str], score_threshold: Optional[float] = None
+        self, data: Any, token_map: Dict[str, str], shift_days: int = 0, score_threshold: Optional[float] = None
     ) -> Any:
-        # Use config threshold if not provided
-        if score_threshold is None:
-            score_threshold = settings.PRESIDIO_FREE_TEXT_THRESHOLD
         """
         Scan free-text fields with Presidio to catch any PHI leaks.
-        
+
         Recursively traverses the data structure. If a field name matches FREE_TEXT_FIELDS,
         it runs Presidio analysis and replaces detected entities with tokens.
         Updates token_map with any new entities found.
         """
+        # Use config threshold if not provided
+        if score_threshold is None:
+            score_threshold = settings.PRESIDIO_FREE_TEXT_THRESHOLD
         if not self.analyzer:
             return data
 
@@ -843,7 +1063,7 @@ class PresidioDeIdentificationService:
                 for key, value in obj.items():
                     # Check if this is a free-text field
                     if isinstance(value, str) and key.lower() in FREE_TEXT_FIELDS:
-                        self._process_single_string(obj, key, value, token_map, score_threshold=score_threshold)
+                        self._process_single_string(obj, key, value, token_map, shift_days, score_threshold)
                     
                     # Recurse
                     elif isinstance(value, (dict, list)):
@@ -862,132 +1082,245 @@ class PresidioDeIdentificationService:
         Handles cases where 'john.doe@email.com' is detected as PERSON 'john.doe'.
         """
         filtered = []
-        
-        # Pre-calculate emails to avoid O(N^2) lookups if possible, 
-        # but N is usually small (<100 entities).
         emails = [r for r in results if r.entity_type == "EMAIL_ADDRESS"]
         
         for r in results:
             if r.entity_type == "PERSON":
-                # Check for any overlap with an EMAIL_ADDRESS
                 overlaps_email = any(
                     not (r.end <= e.start or r.start >= e.end)
                     for e in emails
                 )
-                
-                if overlaps_email:
-                    continue
-
+                if overlaps_email: continue
             filtered.append(r)
-            
         return filtered
 
+    def _sanitize_ner_results(self, results: List[Any], text: str) -> List[Any]:
+        """
+        Single authoritative validation gate for all NER detections.
+        Applies 5 quality rules before any tokenization occurs.
+        """
+        if not results:
+            return []
+
+        # Pre-compute ZIP spans for Issue 2
+        zip_spans = {
+            (r.start, r.end)
+            for r in results if r.entity_type in (
+                "ZIP_CODE",
+                "VEHICLE_PLATE",
+                "PASSPORT",
+                "DRIVERS_LICENSE",
+                "NPI",
+            )
+        }
+        # Pre-compute EMAIL spans for Issue 4
+        email_spans_list = [r for r in results if r.entity_type == "EMAIL_ADDRESS"]
+
+        sanitized = []
+        for res in results:
+            span_text = text[res.start:res.end]
+            entity_type = res.entity_type
+
+            # --- Issue 2: ZIP Code vs Phone disambiguation ---
+            if entity_type == "PHONE_NUMBER":
+                # Discard if same span is already classified as ZIP_CODE
+                if (res.start, res.end) in zip_spans:
+                    safe_logger.debug(f"Dropping PHONE_NUMBER for '{span_text}' — overlaps with ZIP_CODE span")
+                    continue
+                # Discard if it doesn't look like a real phone number pattern
+                clean = re.sub(r'\s+', ' ', span_text.strip())
+                if not _PHONE_REGEX.match(clean):
+                    safe_logger.debug(f"Dropping PHONE_NUMBER '{span_text}' — does not match strict pattern")
+                    continue
+                # Split concatenated entities (Issue 6)
+                if len(span_text) > 20:
+                    safe_logger.debug(f"Dropping concatenated PHONE span '{span_text}'")
+                    continue
+
+            # --- Issue 3: Street/Date fusion ---
+            if entity_type in ("STREET_ADDRESS", "ADDRESS"):
+                # Must start with a digit then a word
+                if not _STREET_REGEX.match(span_text.strip()):
+                    safe_logger.debug(f"Dropping {entity_type} for '{span_text}' — fails street pattern")
+                    continue
+                # Must not contain clinical narrative words
+                words_lower = set(span_text.lower().split())
+                if words_lower & _CLINICAL_CONTEXT_WORDS:
+                    safe_logger.debug(f"Dropping {entity_type} for '{span_text}' — contains clinical words")
+                    continue
+
+            # --- Issue 4: Email detected as PERSON ---
+            if entity_type == "PERSON":
+                # Direct @-check on the span text itself
+                if "@" in span_text:
+                    safe_logger.debug(f"Dropping PERSON '{span_text}' — contains email address")
+                    continue
+                # Overlap with any EMAIL_ADDRESS span
+                overlaps_email = any(
+                    not (res.end <= e.start or res.start >= e.end)
+                    for e in email_spans_list
+                )
+                if overlaps_email:
+                    safe_logger.debug(f"Dropping PERSON '{span_text}' — overlaps with email span")
+                    continue
+
+            # --- Issue 5: Multi-name block — span too large ---
+            # If a PERSON span is very long, it likely grouped repeated name references.
+            # We skip it here; the _replace_in_string / variant_token_map will handle
+            # the individual occurrences correctly from the known identity groups.
+            if entity_type == "PERSON" and (res.end - res.start) > _MAX_ENTITY_SPAN:
+                safe_logger.debug(f"Dropping oversized PERSON span ({res.end - res.start} chars) — likely name block")
+                continue
+
+            # --- Pre-flight: discard credential suffixes (', MD', 'PhD', etc.) ---
+            clean_span = span_text.strip(" ,.()")
+            if len(clean_span) < _MIN_ENTITY_CHARS:
+                safe_logger.debug(f"Dropping short span '{span_text}' ({entity_type})")
+                continue
+            if _SUFFIX_ONLY_REGEX.match(span_text):
+                safe_logger.debug(f"Dropping credential suffix '{span_text}' — not a standalone person")
+                continue
+
+            sanitized.append(res)
+
+        return sanitized
+
+    def _resolve_overlapping_spans(self, results: List[Any]) -> List[Any]:
+        """
+        Resolves overlapping entity spans using the 'Longest Wins' strategy.
+        1. Sort by span length (descending).
+        2. Keep a span only if it doesn't overlap with an already kept (longer) span.
+        """
+        if not results:
+            return []
+
+        # Sort by length DESC, then by score DESC
+        sorted_results = sorted(
+            results, 
+            key=lambda x: (-(x.end - x.start), -x.score)
+        )
+
+        final_results = []
+        for res in sorted_results:
+            # Check overlap with results already in the final list
+            overlaps = False
+            for kept in final_results:
+                # Standard overlap check: [s1, e1] and [s2, e2]
+                if not (res.end <= kept.start or res.start >= kept.end):
+                    overlaps = True
+                    break
+            
+            if not overlaps:
+                final_results.append(res)
+        
+        # Re-sort by start position for processing
+        return sorted(final_results, key=lambda x: x.start)
+
     def _process_single_string(
-        self, parent_obj: Any, key: Any, text: str, token_map: Dict[str, str], score_threshold: Optional[float] = None
+        self, parent_obj: Any, key: Any, text: str, token_map: Dict[str, str], shift_days: int = 0, score_threshold: Optional[float] = None
     ):
-        # Use config threshold if not provided
+        """Analyze and redact a single string value using the industry-level strategy."""
         if score_threshold is None:
             score_threshold = settings.PRESIDIO_FREE_TEXT_THRESHOLD
-        """Analyze and redact a single string value with overlap handling"""
+        if not self.analyzer:
+            return
+            
         try:
-            # Pass user-requested threshold to Presidio
+            # 1. Analyze
             results = self.analyzer.analyze(text=text, language='en', score_threshold=score_threshold)
             if not results:
                 return
 
-            # Filter overlapping email/person logic
-            # This handles cases like 'john.doe@example.com' being detected as PERSON 'john.doe'
-            results = self._filter_email_person_overlap(results)
+            # 2. Sanitize: apply all 5 NER quality rules (ZIP/phone, street fusion, email-person, multi-name block)
+            results = self._sanitize_ner_results(results, text)
 
-            # Filter overlapping spans
-            # 1. Sort by start index
-            results.sort(key=lambda x: x.start)
-            
-            filtered_results = []
-            if results:
-                last_end = -1
-                # Resolve overlapping entities
-                # Priority: 
-                # 1. Start position (earlier wins)
-                # 2. Entity Priority (custom medical entities win)
-                # 3. Span length (longer wins)
-                # 4. Score (more confident wins)
-                for res in sorted(results, key=lambda x: (
-                    x.start, 
-                    -ENTITY_PRIORITY.get(x.entity_type, 0), 
-                    -(x.end - x.start), 
-                    -x.score
-                )):
-                    if res.start >= last_end:
-                        # Only handle entities that meet the threshold
-                        if res.score >= score_threshold:
-                            filtered_results.append(res)
-                            last_end = res.end
+            # 3. Filter already tokenized spans (those replaced by _replace_in_string)
+            results = [res for res in results if "[[" not in text[res.start:res.end]]
+            if not results:
+                return
 
-            # Sort results by start index descending to replace from end
-            filtered_results.sort(key=lambda x: x.start, reverse=True)
-            
-            new_text = text
-            for res in filtered_results:
-                # Trim whitespace from the span to avoid swallowing newlines/punctuation
-                span_text = text[res.start:res.end]
-                prefix_ws = len(span_text) - len(span_text.lstrip())
-                suffix_ws = len(span_text) - len(span_text.rstrip())
-                
-                actual_start = res.start + prefix_ws
-                actual_end = res.end - suffix_ws
-                
-                entity_text = text[actual_start:actual_end]
-                raw_entity_type = res.entity_type
-                
-                if not entity_text:
-                    continue
-                
-                # Normalize so same PHI always gets same token type
-                entity_type = normalize_entity_type(raw_entity_type)
-                
-                # Check if we already have a token for this EXACT value
-                existing_token = None
-                for tok, val in token_map.items():
-                    if val == entity_text:
-                        existing_token = tok
-                        break
-                
-                if not existing_token:
-                    # Generate new token with counter format [[TYPE-01]]
-                    # We need to track counters for this request.
-                    # Since this method is stateless regarding counters, we need to infer from existing tokens
-                    # or better, change the architecture to pass a counter state.
-                    # For now, let's parse existing tokens to find max index for this type.
-                    
-                    max_index = 0
-                    prefix = f"[[{entity_type}-"
-                    for tok in token_map.keys():
-                        if tok.startswith(prefix) and tok.endswith("]]"):
-                            try:
-                                # Extract number from [[TYPE-01]]
-                                number_part = tok[len(prefix):-2]
-                                idx = int(number_part)
-                                if idx > max_index:
-                                    max_index = idx
-                            except ValueError:
-                                continue
-                    
-                    new_index = max_index + 1
-                    existing_token = f"[[{entity_type}-{new_index:02d}]]"
-                    token_map[existing_token] = entity_text
-                
-                # Verify token format to avoid double-tokenizing
-                if "[[" in entity_text and "]]" in entity_text:
-                    continue  # Already tokenized
-
-                # Replace in string
-                new_text = new_text[:actual_start] + existing_token + new_text[actual_end:]
-            
-            parent_obj[key] = new_text
+            # 4. Resolve overlapping spans (Longest Wins) and apply tiers
+            parent_obj[key] = self._process_residual_phi_in_string(text, results, token_map, shift_days, score_threshold)
 
         except Exception as e:
             safe_logger.warning(f"Presidio scan failed for field {key}: {e}")
+
+    def _process_residual_phi_in_string(
+        self, text: str, analyzer_results: List[Any], token_map: Dict[str, str], shift_days: int = 0, score_threshold: float = 0.90
+    ) -> str:
+        """
+        Process late-discovered entities (from NER) using tokenize/strip tiers.
+        Updates the global token_map for TOKENIZE types.
+        """
+        if not analyzer_results:
+            return text
+            
+        # 1. Sanitize: apply all 5 NER quality rules
+        filtered = self._sanitize_ner_results(analyzer_results, text)
+        
+        # 2. Resolve overlaps using Longest-Wins strategy
+        filtered = self._resolve_overlapping_spans(filtered)
+        
+        # 3. Filter by threshold
+        filtered = [res for res in filtered if res.score >= score_threshold]
+        
+        # 4. Replace from end to start to maintain index offsets
+        filtered.sort(key=lambda x: x.start, reverse=True)
+        
+        new_text = text
+        for res in filtered:
+            # Normalize type
+            raw_type = res.entity_type
+            entity_type = normalize_entity_type(raw_type)
+            
+            # Final text check for block-list (headers)
+            entity_text = text[res.start:res.end].strip()
+            if not entity_text or len(entity_text) < 2: continue
+            
+            if entity_text.lower() in NER_BLOCKLIST:
+                continue
+
+            # --- TIER C: DATE HANDLING ---
+            if entity_type == "DATE_TIME":
+                # We trust Stage 5 (Regex) to have shifted common date formats.
+                # Here we just 'Keep' the date so it isn't redacted.
+                # This prevents 'Double Shifting' while ensuring no redaction.
+                continue
+
+            # --- TIER B: STRIP ---
+            if entity_type in STRIP_TYPES or "@" in entity_text or "." in entity_text:
+                new_text = new_text[:res.start] + "[[REDACTED]]" + new_text[res.end:]
+                continue
+                
+            # --- TIER A: TOKENIZE ---
+            if entity_type not in TOKENIZE_TYPES:
+                new_text = new_text[:res.start] + "[[REDACTED]]" + new_text[res.end:]
+                continue
+            
+            # Match or create token for this value
+            existing_token = None
+            for tok, val in token_map.items():
+                if val == entity_text:
+                    existing_token = tok
+                    break
+            
+            if not existing_token:
+                # Find next index for this type
+                max_idx = 0
+                prefix = f"[[{entity_type}-"
+                for tok in token_map.keys():
+                    if tok.startswith(prefix):
+                        try:
+                            idx = int(tok[len(prefix):-2])
+                            if idx > max_idx: max_idx = idx
+                        except (ValueError, IndexError): pass
+                
+                existing_token = f"[[{entity_type}-{max_idx+1:02d}]]"
+                token_map[existing_token] = entity_text
+                
+            new_text = new_text[:res.start] + existing_token + new_text[res.end:]
+            
+        return new_text
 
     def _shift_dates_in_text(self, text: str, shift_days: int) -> str:
         """Helper to shift dates in narrative text."""

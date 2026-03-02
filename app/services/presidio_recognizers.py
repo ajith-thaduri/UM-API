@@ -153,3 +153,81 @@ InsuranceRecognizer = PatternRecognizer(
     context=["Policy", "Group", "Insurance", "BCBS", "Aetna", "Cigna", "United"],
     global_regex_flags=re.IGNORECASE | re.MULTILINE
 )
+
+# --- NEW RECOGNIZERS FOR PII EDGE CASES ---
+
+# IP Address
+ip_patterns = [
+    Pattern("IPv4", r"\b(?:\d{1,3}\.){3}\d{1,3}\b", 0.95),
+]
+IPRecognizer = PatternRecognizer(
+    supported_entity="IP_ADDRESS",
+    patterns=ip_patterns,
+    context=["IP", "Address", "Network"],
+    name="IP_Address_Recognizer"
+)
+
+# Social Security Number
+ssn_patterns = [
+    Pattern("SSN", r"\b\d{3}-\d{2}-\d{4}\b", 0.99),
+]
+SSNRecognizer = PatternRecognizer(
+    supported_entity="SSN",
+    patterns=ssn_patterns,
+    context=["SSN", "Social Security", "Tax ID"],
+    name="SSN_Recognizer"
+)
+
+# Emergency Contact Name (Contextual)
+emergency_patterns = [
+    Pattern("Emergency Contact", r"\bEmergency\s+Contact[:\s]+([A-Z][a-z]+)\s+([A-Z][a-z]+)\b", 0.99),
+    Pattern("Spouse", r"\bSpouse[:\s]+([A-Z][a-z]+)\s+([A-Z][a-z]+)\b", 0.9),
+]
+EmergencyContactRecognizer = PatternRecognizer(
+    supported_entity="PERSON",
+    patterns=emergency_patterns,
+    context=["Emergency", "Spouse", "Contact", "Relationship"]
+)
+
+# Device ID / Account Number
+account_patterns = [
+    Pattern("ID Pattern", r"\b[A-Z]{2,4}-\d{6,15}\b", 0.9),
+]
+AccountRecognizer = PatternRecognizer(
+    supported_entity="ID",
+    patterns=account_patterns,
+    context=["ID", "Account", "Device", "Passport", "License"]
+)
+
+# Vehicle Plate (HIPAA Category #15)
+vehicle_patterns = [
+    Pattern("Vehicle Plate", r"\b[A-Z]{2}-[A-Z]{2,4}-\d{4}\b", 0.95),
+]
+VehiclePlateRecognizer = PatternRecognizer(
+    supported_entity="VEHICLE_PLATE",
+    patterns=vehicle_patterns,
+    context=["Plate", "Vehicle", "VIN", "License Plate"],
+    name="Vehicle_Plate_Recognizer"
+)
+
+# Passport (HIPAA Category #16)
+passport_patterns = [
+    Pattern("Passport", r"\b[A-Z]\d{8,9}\b", 0.95),
+]
+PassportRecognizer = PatternRecognizer(
+    supported_entity="PASSPORT",
+    patterns=passport_patterns,
+    context=["Passport", "Travel", "Nationality"],
+    name="Passport_Recognizer"
+)
+
+# Driver's License (HIPAA Category #16)
+license_patterns = [
+    Pattern("Driver License", r"\b[A-Z]\d{6,8}\b", 0.95),
+]
+DriversLicenseRecognizer = PatternRecognizer(
+    supported_entity="DRIVERS_LICENSE",
+    patterns=license_patterns,
+    context=["License", "DL", "Driver", "Identification"],
+    name="Drivers_License_Recognizer"
+)
