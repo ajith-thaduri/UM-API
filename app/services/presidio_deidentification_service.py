@@ -149,6 +149,7 @@ ENTITY_TYPE_NORMALIZATION = {
     # --- Unified Location Category ---
     "STREET_ADDRESS": "LOCATION",
     "CITY": "LOCATION",
+    "CITY_FACILITY": "LOCATION",
     "ZIP_CODE": "LOCATION",
     "LOCATION": "LOCATION",
     "ADDRESS": "LOCATION",
@@ -168,31 +169,39 @@ ENTITY_TYPE_NORMALIZATION = {
     "SEX": "AGE",
 }
 
-# --- NER False Positive Block-list ---
-# ONLY contains medical/structural header labels that NER incorrectly labels as PERSON/ORG.
-# Do NOT add identifier category names (passport, license, plate) — those are field labels,
-# not identifier VALUES. Adding category names would block real PHI values like 'X12345678'.
-NER_BLOCKLIST = {
-    "patient name", "patient", "name", "admission date", "discharge date",
+# --- NER False Positive Block-lists ---
+# Structural/header labels that must be an exact match to avoid blocking real names
+NER_EXACT_BLOCKLIST = {
+    "patient name", "patient", "admission date", "discharge date",
     "medical record", "mrn", "case number", "account number", "health plan",
     "npi", "provider", "doctor", "staff", "attending", "emergency contact",
     "secondary email", "alias", "alias used", "alternative name", "alt name",
-    "prior records", "result", "flag", "test",
-    "findings", "chest", "result flag", "date test", "physician", "date of birth",
+    "prior records", "result flag", "date test", "physician", "date of birth",
     "dob", "ssn", "social security",
-    "policy number", "group number", "health plan id", "case number", "admission",
+    "policy number", "group number", "health plan id", "admission",
     "discharge", "medical record number", "mrn number", "patient info",
     "physician phone", "physician email", "physician name",
     "physician fax", "patient phone", "patient email",
-    "patient address", "patient name", "emergency phone",
+    "patient address", "emergency phone",
     "emergency email", "contact phone", "contact email",
     "home phone", "mobile phone", "work phone",
     "home address", "work address", "mailing address",
     "primary phone", "secondary phone", "primary email",
-    "medical encounter details", "encounter information",
     "clinical summary", "discharge summary", "admission summary",
-    "patient demographics", "insurance information",
+    "insurance information",
     "billing information", "contact information",
+    # Device / equipment labels
+    "pacemaker model", "serial number", "device id", "model number",
+}
+
+# Clinical phrases/eponyms that can be matched anywhere inside an entity
+NER_PHRASE_BLOCKLIST = {
+    # Headers that might get grouped with other words
+    "medical encounter details", "encounter information", "patient demographics",
+    # Clinical eponyms / disease names that get mis-tagged as PERSON
+    "parkinson", "parkinson's", "crohn", "crohn's", "raynaud", "raynaud's",
+    "alzheimer", "alzheimer's", "huntington", "huntington's", "glasgow coma",
+    "glasgow", "medtronic", "azure", "medicare",
 }
 
 # --- NER Quality Validation ---
@@ -202,9 +211,9 @@ _PHONE_REGEX = re.compile(
     r'^(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}$'
 )
 
-# Valid street address: must START with a digit and END with a street suffix keyword
+# Valid street address: must START with a digit (optional ordinal) and END with a street suffix keyword
 _STREET_REGEX = re.compile(
-    r'^\d{1,6}\s+(?:[A-Za-z0-9]+\s+){0,5}'
+    r'^\d{1,6}(?:st|nd|rd|th)?\s+(?:[A-Za-z0-9]+\s+){0,5}'
     r'(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|'
     r'Drive|Dr|Terrace|Way|Court|Ct|Circle|Cir|Place|Pl|'
     r'Highway|Hwy|Parkway|Pkwy)\b',
@@ -223,13 +232,22 @@ _MAX_ENTITY_SPAN = 50
 # Minimum meaningful token length (chars in the stripped span)
 _MIN_ENTITY_CHARS = 3
 
-# Regex to detect honorific / credential suffix spans that are NOT standalone persons
 _SUFFIX_ONLY_REGEX = re.compile(
-    r'^[,()\s]*(?:MD|DO|PhD|NP|PA|RN|LPN|FNP|DNP|JD|MSW|LCSW)[.,()\s]*$',
+    r'^[,()\s]*(?:MD|DO|PhD|NP|PA|RN|LPN|FNP|DNP|JD|MSW|LCSW|FACS|FACC|FCCP)[.,()\s]*$',
     re.IGNORECASE
 )
 
-_USERNAME_REGEX = re.compile(r'^[a-z][a-z0-9._-]{3,}$', re.IGNORECASE)
+# Regex to trim from PERSON entities
+_CREDENTIALS_TRIM_REGEX = re.compile(
+    r'[,.\s]+(?:MD|DO|PhD|RN|NP|PA|LPN|FNP|DNP|JD|MSW|LCSW|FACS|FACC|FCCP|PGY-?\d)(?:\.?\s*|$)', 
+    re.IGNORECASE
+)
+_HONORIFIC_PREFIX_REGEX = re.compile(
+    r'^(?:Mr\.|Ms\.|Mrs\.|Miss|Dr\.|Prof\.|Pt\.)\s+', 
+    re.IGNORECASE
+)
+
+_USERNAME_REGEX = re.compile(r'^[a-z][a-z0-9._-]*[0-9._-]+[a-z0-9._-]*$', re.IGNORECASE)
 _FILENAME_REGEX = re.compile(r'\.\w{2,5}$', re.IGNORECASE)
 
 _MAX_SPAN_BY_TYPE = {
@@ -319,9 +337,10 @@ ENTITY_PRIORITY = {
     "IP_ADDRESS": 95,
     "MRN": 85,
     "STREET_ADDRESS": 82,
-    "CITY": 80,
     "ZIP_CODE": 78,
     "HOSPITAL": 75,
+    "CITY": 80,
+    "CITY_FACILITY": 80,
     "PERSON": 50,
     "LOCATION": 45,
     "ORGANIZATION": 40,
@@ -1020,11 +1039,10 @@ class PresidioDeIdentificationService:
             r'Rhode\s+Island|South\s+Carolina|South\s+Dakota|Tennessee|Texas|Utah|Vermont|'
             r'Virginia|Washington|West\s+Virginia|Wisconsin|Wyoming'
         )
-        # "Springfield, IL" or "San Diego, CA"
-        result = re.sub(
-            rf'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){{0,2}},\s*(?:{_US_STATE_ABBR})\b',
-            "[[REDACTED]]", result
-        )
+        # Stage 1 regex replacement for State abbreviations removed: 
+        # It was erroneously redacting 'Jane Doe, MD' as a city in Maryland. 
+        # Presidio's built-in LocationRecognizer handles city/state pairs natively anyway.
+
         # "Springfield, Illinois" or "Austin, Texas"
         result = re.sub(
             rf'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){{0,2}},\s*(?:{_US_STATE_FULL})\b',
@@ -1231,11 +1249,15 @@ class PresidioDeIdentificationService:
 
             # --- Issue 3: Street/Date fusion ---
             if entity_type in ("STREET_ADDRESS", "ADDRESS"):
-                # Must start with a digit then a word
-                if not _STREET_REGEX.match(span_text.strip()):
+                _BARE_STREET_REGEX = re.compile(
+                    r'\b(?:on|at|off|near)\s+\w.*?(?:Street|St|Avenue|Ave|Road|Rd|Blvd|Lane|Ln|Drive|Dr|Place|Pl)\b',
+                    re.IGNORECASE
+                )
+                # Allow both full address (starts with digit) and bare street (on/at X Street)
+                if not (_STREET_REGEX.match(span_text.strip()) or _BARE_STREET_REGEX.search(span_text)):
                     safe_logger.debug(f"Dropping {entity_type} for '{span_text}' — fails street pattern")
                     continue
-                # Must not contain clinical narrative words
+                # Must not contain clinical narrative words (for false positive addresses)
                 words_lower = set(span_text.lower().split())
                 if words_lower & _CLINICAL_CONTEXT_WORDS:
                     safe_logger.debug(f"Dropping {entity_type} for '{span_text}' — contains clinical words")
@@ -1285,11 +1307,29 @@ class PresidioDeIdentificationService:
                 continue
 
             # --- LOCATION Filter ---
-            if entity_type in ("LOCATION", "CITY"):
+            if entity_type in ("LOCATION", "CITY", "CITY_FACILITY"):
                 # Reject pure numbers
                 if re.match(r'^\d+$', span_text.strip()): continue
                 # Reject time patterns in location
                 if re.search(r'\b\d{1,2}\s*(?:AM|PM)\b', span_text, re.IGNORECASE): continue
+                # Reject if it looks like a person with credentials (e.g. 'Jane Doe, MD' misidentified as a city in Maryland)
+                if _CREDENTIALS_TRIM_REGEX.search(span_text):
+                    safe_logger.debug(f"Dropping {entity_type} for '{span_text}' — matches professional credential")
+                    continue
+
+            # --- Trimming honorifics and credentials from PERSON ---
+            if entity_type == "PERSON":
+                # Prefix (Mr., Dr.)
+                pre_match = _HONORIFIC_PREFIX_REGEX.match(span_text)
+                if pre_match:
+                    res.start = res.start + pre_match.end()
+                    span_text = text[res.start:res.end]
+                
+                # Suffix (, MD)
+                suf_match = _CREDENTIALS_TRIM_REGEX.search(span_text)
+                if suf_match:
+                    res.end = res.start + suf_match.start()
+                    span_text = text[res.start:res.end]
 
             # --- Pre-flight: discard credential suffixes (', MD', 'PhD', etc.) ---
             clean_span = span_text.strip(" ,.()")
@@ -1392,11 +1432,12 @@ class PresidioDeIdentificationService:
         filtered = self._resolve_overlapping_spans(filtered)
         
         # 3. Filter by threshold (LOCATION gets lower floor of 0.80)
+        # Use a small epsilon (0.005) for float precision safety
         def passes_threshold(res):
             entity_type = normalize_entity_type(res.entity_type)
             if entity_type == "LOCATION":
-                return res.score >= min(score_threshold, 0.80)
-            return res.score >= score_threshold
+                return res.score >= (min(score_threshold, 0.80) - 0.005)
+            return res.score >= (score_threshold - 0.005)
         filtered = [res for res in filtered if passes_threshold(res)]
         
         # 4. Replace from END to START to maintain index offsets in original text
@@ -1418,7 +1459,17 @@ class PresidioDeIdentificationService:
                 continue
             
             # Block-list check (header labels, section titles, etc.)
-            if any(block.lower() in entity_text.lower() for block in NER_BLOCKLIST):
+            is_blocked = False
+            clean_entity = entity_text.lower().strip(" :.,")
+            if clean_entity in NER_EXACT_BLOCKLIST:
+                is_blocked = True
+            else:
+                for block in NER_PHRASE_BLOCKLIST:
+                    if re.search(rf'\b{re.escape(block)}\b', entity_text, re.IGNORECASE):
+                        is_blocked = True
+                        break
+            
+            if is_blocked:
                 continue
 
             # --- TIER C: DATE HANDLING ---

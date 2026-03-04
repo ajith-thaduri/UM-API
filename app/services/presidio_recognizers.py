@@ -74,12 +74,16 @@ location_patterns = [
     # City, State pairs
     Pattern("City StateAbbr", rf"\b[A-Z][a-z]+(?:\s[A-Z][a-z]+){{0,2}},\s*(?:{VALID_STATES})\b", 0.99),
     Pattern("City StateFull", r"\b[A-Z][a-z]+(?:\s[A-Z][a-z]+){{0,2}},\s*(?:Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|Delaware|Florida|Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|Kentucky|Louisiana|Maine|Maryland|Massachusetts|Michigan|Minnesota|Mississippi|Missouri|Montana|Nebraska|Nevada|New[ \t]Hampshire|New[ \t]Jersey|New[ \t]Mexico|New[ \t]York|North[ \t]Carolina|North[ \t]Dakota|Ohio|Oklahoma|Oregon|Pennsylvania|Rhode[ \t]Island|South[ \t]Carolina|South[ \t]Dakota|Tennessee|Texas|Utah|Vermont|Virginia|Washington|West[ \t]Virginia|Wisconsin|Wyoming)\b", 0.99),
+    # Lone Cities (Commonly missed or ambiguous)
+    Pattern("Major Cities", r"\b(?:Washington|Buffalo|Chicago|Austin|Seattle|Boston|Atlanta|Dallas|Denver|Houston|Miami|Phoenix|Philadelphia|Detroit|Minneapolis|Pittsburgh)\b", 0.85),
+    # Locations like 'Shelter', 'Clinic'
+    Pattern("Facility Word", r"\b(?:Homeless Shelter|Recovery Center|Nursing Home|Care Facility)\b", 0.85),
 ]
 
 LocationRecognizer = PatternRecognizer(
-    supported_entity="LOCATION",
+    supported_entity="CITY_FACILITY",
     patterns=location_patterns,
-    global_regex_flags=re.MULTILINE | re.DOTALL
+    global_regex_flags=re.IGNORECASE | re.MULTILINE | re.DOTALL
 )
 
 # MAC Address Detection
@@ -121,10 +125,17 @@ DOBRecognizer = PatternRecognizer(
 
 # Street Address
 street_patterns = [
+    # Full address with house number (optional ordinal)
     Pattern(
         "Street Address",
-        r"\b\d{1,6}\s(?:[A-Za-z0-9#-]+\s){1,6}(?:Street|St|Avenue|Ave|Road|Rd|Blvd|Lane|Ln|Drive|Dr|Terrace|Way|Court|Ct|Circle|Cir|Place|Pl)\b",
+        r"\b\d{1,6}(?:st|nd|rd|th)?\s(?:[A-Za-z0-9#-]+\s){1,6}(?:Street|St|Avenue|Ave|Road|Rd|Blvd|Lane|Ln|Drive|Dr|Terrace|Way|Court|Ct|Circle|Cir|Place|Pl)\b",
         0.99
+    ),
+    # Bare street name (e.g. 'on 5th Street')
+    Pattern(
+        "Bare Street",
+        r"\b(?:on|at|off|near)\s+(?:\d{1,3}(?:st|nd|rd|th)?\s+)?(?:[A-Za-z0-9]+\s+){1,2}(?:Street|St|Avenue|Ave|Road|Rd|Blvd|Lane|Ln|Drive|Dr|Place|Pl)\b",
+        0.85
     )
 ]
 

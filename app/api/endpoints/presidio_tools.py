@@ -28,7 +28,7 @@ ALL_ENTITY_TYPES = [
     "PERSON", "DATE_TIME", "PHONE_NUMBER", "SSN", "US_SSN", "EMAIL_ADDRESS",
     "LOCATION", "ORGANIZATION", "IP_ADDRESS", "URL", "VEHICLE_PLATE", 
     "PASSPORT", "DRIVERS_LICENSE", "US_DRIVER_LICENSE", "US_PASSPORT",
-    "MRN", "TIME", "HOSPITAL", "PROVIDER", "PATIENT_FULL_NAME", "CITY", "AGE", "ID",
+    "MRN", "TIME", "HOSPITAL", "PROVIDER", "PATIENT_FULL_NAME", "CITY", "CITY_FACILITY", "AGE", "ID",
     "STREET_ADDRESS", "ZIP_CODE", "NPI", "INSURANCE_ID", "ACCOUNT_NUMBER", "PII",
 ]
 
@@ -38,6 +38,7 @@ DEFAULT_MEDICAL_ENTITIES = [
     "LOCATION", "ORGANIZATION", "IP_ADDRESS", "URL", "VEHICLE_PLATE",
     "PASSPORT", "DRIVERS_LICENSE", "MRN", "TIME", "HOSPITAL", "PROVIDER",
     "STREET_ADDRESS", "ZIP_CODE", "NPI", "INSURANCE_ID", "ID", "ACCOUNT_NUMBER",
+    "CITY_FACILITY", 
 ]
 
 
@@ -512,6 +513,8 @@ def get_supported_entities():
             "US_SSN": "US Social Security Numbers",
             "EMAIL_ADDRESS": "Email addresses",
             "LOCATION": "Physical addresses, cities, states",
+            "CITY": "City names",
+            "CITY_FACILITY": "Major cities and facilities (e.g. Homeless Shelters)",
             "ORGANIZATION": "Hospital names, companies",
             "NRP": "Nationalities, religious groups",
             "CREDIT_CARD": "Credit card numbers",
