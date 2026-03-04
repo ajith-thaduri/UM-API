@@ -29,7 +29,7 @@ ALL_ENTITY_TYPES = [
     "LOCATION", "ORGANIZATION", "IP_ADDRESS", "URL", "VEHICLE_PLATE", 
     "PASSPORT", "DRIVERS_LICENSE", "US_DRIVER_LICENSE", "US_PASSPORT",
     "MRN", "TIME", "HOSPITAL", "PROVIDER", "PATIENT_FULL_NAME", "CITY", "CITY_FACILITY", "AGE", "ID",
-    "STREET_ADDRESS", "ZIP_CODE", "NPI", "INSURANCE_ID", "ACCOUNT_NUMBER", "PII",
+    "STREET_ADDRESS", "ZIP_CODE", "NPI", "INSURANCE_ID", "ACCOUNT_NUMBER", "PII", "COORDINATE",
 ]
 
 # Default entities for medical context (The 18 Safe Harbor Identifiers)
@@ -38,7 +38,7 @@ DEFAULT_MEDICAL_ENTITIES = [
     "LOCATION", "CITY", "CITY_FACILITY", "STREET_ADDRESS", "ZIP_CODE",
     "ORGANIZATION", "HOSPITAL", "PROVIDER", 
     "IP_ADDRESS", "URL", "VEHICLE_PLATE", "PASSPORT", "DRIVERS_LICENSE", 
-    "MRN", "NPI", "INSURANCE_ID", "ID", "ACCOUNT_NUMBER",
+    "MRN", "NPI", "INSURANCE_ID", "ID", "ACCOUNT_NUMBER", "COORDINATE",
 ]
 
 
@@ -515,6 +515,7 @@ def get_supported_entities():
             "LOCATION": "Physical addresses, cities, states",
             "CITY": "City names",
             "CITY_FACILITY": "Major cities and facilities (e.g. Homeless Shelters)",
+            "COORDINATE": "GPS coordinates (Latitude and Longitude)",
             "ORGANIZATION": "Hospital names, companies",
             "NRP": "Nationalities, religious groups",
             "CREDIT_CARD": "Credit card numbers",

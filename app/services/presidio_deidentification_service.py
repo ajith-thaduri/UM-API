@@ -67,7 +67,8 @@ from app.services.presidio_recognizers import (
     DriversLicenseRecognizer,
     MACAddressRecognizer,
     SubAddressRecognizer,
-    AgeRecognizer
+    AgeRecognizer,
+    CoordinateRecognizer
 )
 from app.utils.safe_logger import get_safe_logger
 from presidio_anonymizer.entities import OperatorConfig
@@ -167,6 +168,7 @@ ENTITY_TYPE_NORMALIZATION = {
     "TIME": "DATE_TIME",
     "AGE": "AGE",
     "SEX": "AGE",
+    "COORDINATE": "COORDINATE",
 }
 
 # --- NER False Positive Block-lists ---
@@ -270,6 +272,7 @@ STRIP_TYPES = {
     "DRIVERS_LICENSE", "DEVICE_ID", "VEHICLE_PLATE",
     "ACCOUNT_NUMBER", "FAX", "NATIONAL_ID", "WEBSITE",
     "ZIP_CODE", "STREET_ADDRESS", "CITY", "MAC_ADDRESS", "SUB_ADDRESS",
+    "COORDINATE",
 }
 
 
@@ -389,7 +392,8 @@ class PresidioDeIdentificationService:
             DriversLicenseRecognizer,
             MACAddressRecognizer,
             SubAddressRecognizer,
-            AgeRecognizer
+            AgeRecognizer,
+            CoordinateRecognizer
         ]
 
         if PRESIDIO_AVAILABLE:

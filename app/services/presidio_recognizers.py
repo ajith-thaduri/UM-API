@@ -268,3 +268,21 @@ DriversLicenseRecognizer = PatternRecognizer(
     context=["License", "DL", "Driver", "Identification"],
     name="Drivers_License_Recognizer"
 )
+
+# Coordinates (Latitude / Longitude)
+coordinate_patterns = [
+    # Decimal Degrees: 40.7128° N, 74.0060° W or just 40.7128, -74.0060
+    Pattern("Decimal Coordinates", r"\b-?\d{1,3}\.\d{4,10}[°\s]*,?\s*-?\d{1,3}\.\d{4,10}[°\s]*\b", 0.95),
+    # Labeled Decimal: Lat: 40.7128, Long: -74.0060
+    Pattern("Labeled Latitude", r"\bLat(?:itude)?[:\s]*-?\d{1,3}\.\d{4,10}\b", 0.95),
+    Pattern("Labeled Longitude", r"\bLong?(?:itude)?[:\s]*-?\d{1,3}\.\d{4,10}\b", 0.95),
+    # Degrees Minutes Seconds: 40° 42' 46" N
+    Pattern("DMS Coordinates", r"\b\d{1,3}°\s*\d{1,2}'\s*\d{1,2}(?:\.\d+)?\"\s*[NSEW]\b", 0.95),
+]
+
+CoordinateRecognizer = PatternRecognizer(
+    supported_entity="COORDINATE",
+    patterns=coordinate_patterns,
+    context=["coordinate", "location", "lat", "long", "gps"],
+    global_regex_flags=re.IGNORECASE | re.MULTILINE
+)
