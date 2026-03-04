@@ -29,7 +29,7 @@ hospital_patterns = [
         "Hospital",
         r"\b(?:[A-Z][a-z]+(?:'s?)?\s+){1,5}"
         r"(?:Hospital|Clinic|Medical Center|Health Center|Health System|"
-        r"Medical Group|Diagnostic Laboratory|Recovery Center|Hospital Hospital)\b",
+        r"Medical Group|Diagnostic Laboratory|Recovery Center|Pharmacy)\b",
         0.95
     ),
     Pattern("Healthcare Org", r"\b[A-Z][a-z]+\s+Healthcare\b", 0.95),
@@ -41,10 +41,21 @@ HospitalRecognizer = PatternRecognizer(
     global_regex_flags=re.MULTILINE | re.DOTALL 
 )
 
+# Employers / Organizations
+employer_patterns = [
+    Pattern("Corporate Org", r"\b(?:[A-Z][A-Za-z.'-]+(?:[ \t]+[A-Z][A-Za-z.'-]+){0,3})[ \t]+(?:Corporation|Corp\.|Inc\.|LLC|Company|Logistics|Power[ \t]+Plant|Bank|Pharmacy)\b", 0.95),
+    Pattern("BlueCross", r"\bBlue[ \t]?Cross[ \t]?(?:Blue[ \t]?Shield)?(?:[ \t]+of[ \t]+[A-Z][A-Za-z]+)?\b", 0.95)
+]
+EmployerRecognizer = PatternRecognizer(
+    supported_entity="ORGANIZATION",
+    patterns=employer_patterns,
+    global_regex_flags=re.IGNORECASE | re.MULTILINE
+)
+
 # HIPAA Category #1: Names (Doctors/Providers)
 doctor_patterns = [
-    Pattern("Dr. Name", r"\b(?:Dr\.?|Doctor|Physician)\s+[A-Z][a-z]+\s+[A-Z][a-z]+\b", 0.95),
-    Pattern("Dr. Single Name", r"\b(?:Dr\.?|Doctor|Physician)\s+[A-Z][a-z]+\b", 0.9),
+    Pattern("Dr. Name", r"\b(?:Dr\.?|Doctor|Physician)\s+(?!Phone\b|Email\b|Contact\b|Fax\b|Signature\b)[A-Z][a-z]+\s+[A-Z][a-z]+\b", 0.95),
+    Pattern("Dr. Single Name", r"\b(?:Dr\.?|Doctor|Physician)\s+(?!Phone\b|Email\b|Contact\b|Fax\b|Signature\b)[A-Z][a-z]+\b", 0.9),
 ]
 
 DoctorRecognizer = PatternRecognizer(
@@ -84,6 +95,22 @@ LocationRecognizer = PatternRecognizer(
     supported_entity="CITY_FACILITY",
     patterns=location_patterns,
     global_regex_flags=re.IGNORECASE | re.MULTILINE | re.DOTALL
+)
+
+state_patterns = [
+    Pattern("State Full", r"\b(?:Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|Delaware|Florida|Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|Kentucky|Louisiana|Maine|Maryland|Massachusetts|Michigan|Minnesota|Mississippi|Missouri|Montana|Nebraska|Nevada|New[ \t]Hampshire|New[ \t]Jersey|New[ \t]Mexico|New[ \t]York|North[ \t]Carolina|North[ \t]Dakota|Ohio|Oklahoma|Oregon|Pennsylvania|Rhode[ \t]Island|South[ \t]Carolina|South[ \t]Dakota|Tennessee|Texas|Utah|Vermont|Virginia|Washington|West[ \t]Virginia|Wisconsin|Wyoming)\b", 0.8)
+]
+StateRecognizer = PatternRecognizer(
+    supported_entity="LOCATION",
+    patterns=state_patterns
+)
+
+country_patterns = [
+    Pattern("Country", r"\b(?:USA|U\.S\.|U\.S\.A\.|United States|United Kingdom|UK)\b", 0.8)
+]
+CountryRecognizer = PatternRecognizer(
+    supported_entity="LOCATION",
+    patterns=country_patterns
 )
 
 # MAC Address Detection
@@ -171,7 +198,7 @@ AgeRecognizer = PatternRecognizer(
 
 # National Provider Identifier
 npi_patterns = [
-    Pattern("NPI", r"\bNPI[:\s]*\d{10}\b", 0.99)
+    Pattern("NPI Digits", r"\b\d{10}\b", 0.85)
 ]
 
 NPIRecognizer = PatternRecognizer(
@@ -285,4 +312,14 @@ CoordinateRecognizer = PatternRecognizer(
     patterns=coordinate_patterns,
     context=["coordinate", "location", "lat", "long", "gps"],
     global_regex_flags=re.IGNORECASE | re.MULTILINE
+)
+
+# Credit Cards
+credit_card_patterns = [
+    Pattern("Credit Card", r"\b(?:\d{4}[-\s]?){3}\d{4}\b", 0.95)
+]
+CreditCardRecognizer = PatternRecognizer(
+    supported_entity="CREDIT_CARD",
+    patterns=credit_card_patterns,
+    context=["Credit", "Card", "Visa", "Mastercard", "Amex"]
 )

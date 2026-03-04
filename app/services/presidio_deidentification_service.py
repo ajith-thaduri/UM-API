@@ -68,7 +68,11 @@ from app.services.presidio_recognizers import (
     MACAddressRecognizer,
     SubAddressRecognizer,
     AgeRecognizer,
-    CoordinateRecognizer
+    CoordinateRecognizer,
+    EmployerRecognizer,
+    StateRecognizer,
+    CountryRecognizer,
+    CreditCardRecognizer
 )
 from app.utils.safe_logger import get_safe_logger
 from presidio_anonymizer.entities import OperatorConfig
@@ -200,6 +204,7 @@ NER_EXACT_BLOCKLIST = {
 NER_PHRASE_BLOCKLIST = {
     # Headers that might get grouped with other words
     "medical encounter details", "encounter information", "patient demographics",
+    "hospital encounter", "information hospital", "encounter details",
     # Clinical eponyms / disease names that get mis-tagged as PERSON
     "parkinson", "parkinson's", "crohn", "crohn's", "raynaud", "raynaud's",
     "alzheimer", "alzheimer's", "huntington", "huntington's", "glasgow coma",
@@ -235,13 +240,13 @@ _MAX_ENTITY_SPAN = 50
 _MIN_ENTITY_CHARS = 3
 
 _SUFFIX_ONLY_REGEX = re.compile(
-    r'^[,()\s]*(?:MD|DO|PhD|NP|PA|RN|LPN|FNP|DNP|JD|MSW|LCSW|FACS|FACC|FCCP)[.,()\s]*$',
+    r'^[,()\s]*\b(?:MD|DO|PhD|NP|PA|RN|LPN|FNP|DNP|JD|MSW|LCSW|FACS|FACC|FCCP)\b[.,()\s]*$',
     re.IGNORECASE
 )
 
 # Regex to trim from PERSON entities
 _CREDENTIALS_TRIM_REGEX = re.compile(
-    r'[,.\s]+(?:MD|DO|PhD|RN|NP|PA|LPN|FNP|DNP|JD|MSW|LCSW|FACS|FACC|FCCP|PGY-?\d)(?:\.?\s*|$)', 
+    r'[,.\s]+\b(?:MD|DO|PhD|RN|NP|PA|LPN|FNP|DNP|JD|MSW|LCSW|FACS|FACC|FCCP|PGY-?\d)\b(?:\.?\s*|$)', 
     re.IGNORECASE
 )
 _HONORIFIC_PREFIX_REGEX = re.compile(
@@ -393,7 +398,11 @@ class PresidioDeIdentificationService:
             MACAddressRecognizer,
             SubAddressRecognizer,
             AgeRecognizer,
-            CoordinateRecognizer
+            CoordinateRecognizer,
+            EmployerRecognizer,
+            StateRecognizer,
+            CountryRecognizer,
+            CreditCardRecognizer
         ]
 
         if PRESIDIO_AVAILABLE:
@@ -527,18 +536,18 @@ class PresidioDeIdentificationService:
         if not self.analyzer:
             return
             
-        # Get list of currently registered entity types
-        registered_entities = []
+        # Get list of currently registered recognizer names
+        registered_names = []
         for r in self.analyzer.registry.recognizers:
-            if hasattr(r, 'supported_entities'):
-                registered_entities.extend(r.supported_entities)
+            if hasattr(r, 'name'):
+                registered_names.append(r.name)
             
         for recognizer in self.custom_recognizers:
             # Check if already registered to avoid duplicates
-            entity_type = recognizer.supported_entities[0] if hasattr(recognizer, 'supported_entities') and recognizer.supported_entities else None
-            if entity_type and entity_type not in registered_entities:
+            rec_name = recognizer.name if hasattr(recognizer, 'name') else None
+            if rec_name and rec_name not in registered_names:
                 self.analyzer.registry.add_recognizer(recognizer)
-                safe_logger.debug(f"Registered custom recognizer: {entity_type}")
+                safe_logger.debug(f"Registered custom recognizer: {rec_name}")
         
         safe_logger.info(f"Custom HIPAA recognizers registered. Total: {len(self.custom_recognizers)}")
 
@@ -1235,6 +1244,21 @@ class PresidioDeIdentificationService:
             span_text = text[res.start:res.end]
             entity_type = res.entity_type
 
+            # --- Block-list check (applies globally, even in Lab) ---
+            is_blocked = False
+            clean_entity = span_text.lower().strip(" :.,")
+            if clean_entity in NER_EXACT_BLOCKLIST:
+                is_blocked = True
+            else:
+                for block in NER_PHRASE_BLOCKLIST:
+                    if re.search(rf'\b{re.escape(block)}\b', span_text, re.IGNORECASE):
+                        is_blocked = True
+                        break
+            
+            if is_blocked:
+                safe_logger.debug(f"Dropping {entity_type} '{span_text}' — hit NER blocklist")
+                continue
+
             # --- Issue 2: ZIP Code vs Phone disambiguation ---
             if entity_type == "PHONE_NUMBER":
                 # Discard if same span is already classified as ZIP_CODE
@@ -1311,7 +1335,7 @@ class PresidioDeIdentificationService:
                 continue
 
             # --- LOCATION Filter ---
-            if entity_type in ("LOCATION", "CITY", "CITY_FACILITY"):
+            if entity_type in ("LOCATION", "CITY", "CITY_FACILITY", "STREET_ADDRESS"):
                 # Reject pure numbers
                 if re.match(r'^\d+$', span_text.strip()): continue
                 # Reject time patterns in location
@@ -1323,11 +1347,8 @@ class PresidioDeIdentificationService:
 
             # --- Trimming honorifics and credentials from PERSON ---
             if entity_type == "PERSON":
-                # Prefix (Mr., Dr.)
-                pre_match = _HONORIFIC_PREFIX_REGEX.match(span_text)
-                if pre_match:
-                    res.start = res.start + pre_match.end()
-                    span_text = text[res.start:res.end]
+                # We intentionally keep prefixes (Dr., Mr., Mrs.) based on user feedback 
+                # to allow full context spans like 'Dr. Jane Doe' rather than just 'Jane Doe'
                 
                 # Suffix (, MD)
                 suf_match = _CREDENTIALS_TRIM_REGEX.search(span_text)
@@ -1460,20 +1481,6 @@ class PresidioDeIdentificationService:
             # at positions [res.start:res.end] haven't been touched yet.
             entity_text = new_text[res.start:res.end].strip()
             if not entity_text or len(entity_text) < 2:
-                continue
-            
-            # Block-list check (header labels, section titles, etc.)
-            is_blocked = False
-            clean_entity = entity_text.lower().strip(" :.,")
-            if clean_entity in NER_EXACT_BLOCKLIST:
-                is_blocked = True
-            else:
-                for block in NER_PHRASE_BLOCKLIST:
-                    if re.search(rf'\b{re.escape(block)}\b', entity_text, re.IGNORECASE):
-                        is_blocked = True
-                        break
-            
-            if is_blocked:
                 continue
 
             # --- TIER C: DATE HANDLING ---
