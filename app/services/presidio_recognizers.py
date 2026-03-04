@@ -276,7 +276,8 @@ account_patterns = [
 AccountRecognizer = PatternRecognizer(
     supported_entity="ID",
     patterns=account_patterns,
-    context=["ID", "Account", "Device", "Passport", "License"]
+    context=["ID", "Account", "Device", "Passport", "License"],
+    name="Account_Recognizer"
 )
 
 # Vehicle Plate (HIPAA Category #15)
@@ -315,10 +316,10 @@ DriversLicenseRecognizer = PatternRecognizer(
 # Coordinates (Latitude / Longitude)
 coordinate_patterns = [
     # Decimal Degrees with Optional Direction: 40.7128 N, 74.0060 W
-    Pattern("Decimal Coordinates", r"\b-?\d{1,3}\.\d{4,10}\s*[NSEW]?\s*,?\s*-?\d{1,3}\.\d{4,10}\s*[NSEW]?\b", 0.95),
+    Pattern("Decimal Coordinates", r"\b-?\d{1,3}\.\d{3,10}[°\s]*[NSEW]?\s*,?\s*-?\d{1,3}\.\d{3,10}[°\s]*[NSEW]?\b", 0.95),
     # Labeled Decimal: Lat: 40.7128, Long: -74.0060
-    Pattern("Labeled Latitude", r"\bLat(?:itude)?[:\s]*-?\d{1,3}\.\d{4,10}\s*[NS]?\b", 0.95),
-    Pattern("Labeled Longitude", r"\bLong?(?:itude)?[:\s]*-?\d{1,3}\.\d{4,10}\s*[EW]?\b", 0.95),
+    Pattern("Labeled Latitude", r"\bLat(?:itude)?[:\s]*-?\d{1,3}\.\d{3,10}[°\s]*[NS]?\b", 0.95),
+    Pattern("Labeled Longitude", r"\bLong?(?:itude)?[:\s]*-?\d{1,3}\.\d{3,10}[°\s]*[EW]?\b", 0.95),
     # Degrees Minutes Seconds: 40° 42' 46" N
     Pattern("DMS Coordinates", r"\b\d{1,3}°\s*\d{1,2}'\s*\d{1,2}(?:\.\d+)?\"\s*[NSEW]\b", 0.95),
 ]
@@ -338,7 +339,8 @@ credit_card_patterns = [
 CreditCardRecognizer = PatternRecognizer(
     supported_entity="CREDIT_CARD",
     patterns=credit_card_patterns,
-    context=["Credit", "Card", "Visa", "Mastercard", "Amex"]
+    context=["Credit", "Card", "Visa", "Mastercard", "Amex"],
+    name="CreditCard_Recognizer"
 )
 # Usernames
 username_patterns = [
@@ -347,7 +349,8 @@ username_patterns = [
 UsernameRecognizer = PatternRecognizer(
     supported_entity="USERNAME",
     patterns=username_patterns,
-    context=["user", "username", "login", "portal"]
+    context=["user", "username", "login", "portal"],
+    name="Username_Recognizer"
 )
 
 # Patient Filenames
@@ -357,5 +360,6 @@ filename_patterns = [
 FilenameRecognizer = PatternRecognizer(
     supported_entity="FILENAME",
     patterns=filename_patterns,
-    context=["file", "photo", "image", "upload", "attachment"]
+    context=["file", "photo", "image", "upload", "attachment"],
+    name="Filename_Recognizer"
 )
