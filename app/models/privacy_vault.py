@@ -9,8 +9,8 @@ Each vault entry contains:
 Vault entries expire after PRIVACY_VAULT_RETENTION_DAYS (default: 90 days).
 """
 
-from datetime import datetime, timedelta
-from sqlalchemy import Column, String, Integer, DateTime, ForeignKey, Index
+from datetime import datetime, timedelta, timezone
+from sqlalchemy import Column, String, Integer, DateTime, ForeignKey, Index, Boolean, text
 from sqlalchemy.dialects.postgresql import JSONB
 import uuid
 
@@ -34,22 +34,35 @@ class PrivacyVault(Base):
     # Date shifting: random offset in [0, 30] days
     date_shift_days = Column(Integer, nullable=False)
 
-    # Token map: { "[[PERSON::a94f2c3b12ef]]": "John Doe", ... }
+    # Token map: { "[[PERSON-01]]": "John Doe", ... }
     # CRITICAL: This is 1:1 mapping, every entity instance gets a unique token
-    # Format: [[TYPE::uuid12]] (48 bits, ~281 trillion combinations)
+    # Format: [[TYPE-NN]] counter-based tokens
     token_map = Column(JSONB, nullable=False, default=dict)
 
     # Shifted date field paths (for structure-aware reversal)
     # [{"path": "timeline[0].date", "original": "2024-01-15", "shifted": "2024-02-01"}, ...]
     shifted_fields = Column(JSONB, nullable=True, default=list)
 
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-    expires_at = Column(DateTime, nullable=True)
+    # Active vault flag: only one vault per case should be active at a time.
+    # When a case is reprocessed, the old vault is deactivated before creating a new one.
+    # A partial unique index at the DB level enforces this constraint.
+    is_active = Column(Boolean, nullable=False, default=True)
+
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    expires_at = Column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
         Index("idx_privacy_vault_case", "case_id"),
         Index("idx_privacy_vault_user", "user_id"),
         Index("idx_privacy_vault_expires", "expires_at"),
+        # Partial unique index: enforces only ONE active vault per case at the DB level.
+        # When a case is reprocessed, deactivate old vaults before inserting a new one.
+        Index(
+            "uq_privacy_vault_active_case",
+            "case_id",
+            unique=True,
+            postgresql_where=text("is_active = TRUE"),
+        ),
     )
 
     def __init__(self, **kwargs):
@@ -57,7 +70,7 @@ class PrivacyVault(Base):
         # Set expiration date based on retention policy
         if not self.expires_at:
             retention_days = getattr(settings, "PRIVACY_VAULT_RETENTION_DAYS", 90)
-            self.expires_at = datetime.utcnow() + timedelta(days=retention_days)
+            self.expires_at = datetime.now(timezone.utc) + timedelta(days=retention_days)
 
     def __repr__(self):
         return f"<PrivacyVault case_id={self.case_id} tokens={len(self.token_map)} expires={self.expires_at}>"

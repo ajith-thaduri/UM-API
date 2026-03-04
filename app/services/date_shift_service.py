@@ -10,7 +10,6 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
 
 from app.utils.date_utils import normalize_date_format, parse_date_for_sort
-from app.repositories.case_date_shift_repository import CaseDateShiftRepository
 
 logger = logging.getLogger(__name__)
 
@@ -163,13 +162,26 @@ def shift_contradictions_dates(contradictions: List[Dict], shift_days: int, dire
 
 
 class DateShiftService:
-    """Service for per-case date shift and apply/reverse in payloads."""
+    """
+    Stateless date-shift utilities for the legacy Tier 2 fallback path.
 
-    def __init__(self):
-        self._repo = CaseDateShiftRepository()
+    NOTE: The authoritative date shift is stored in `privacy_vault.date_shift_days`
+    and managed by PresidioDeIdentificationService.  This class only serves the
+    legacy summary path (ENABLE_TWO_TIER_ARCHITECTURE=False) and pure utility
+    helpers used across the codebase.  It no longer writes to `case_date_shifts`.
+    """
 
     def get_or_create_shift_days(self, db, case_id: str) -> int:
-        return self._repo.get_or_create_shift_days(db, case_id)
+        """
+        Return a transient shift_days for the legacy summary path.
+        No longer persisted to case_date_shifts — that table is superseded by privacy_vault.
+        The legacy path is only active when ENABLE_TWO_TIER_ARCHITECTURE=False.
+        """
+        # Generate a deterministic-ish value from the case_id so repeated legacy calls
+        # within the same process return the same value (best-effort).
+        import hashlib
+        seed = int(hashlib.sha256(case_id.encode()).hexdigest(), 16) % 30
+        return max(1, seed)  # Always at least 1 day
 
     def format_timeline_for_prompt(self, timeline_events: List[Dict]) -> str:
         """Format timeline events as text for prompt (caller must pass already-shifted events)."""

@@ -68,6 +68,8 @@ _ROBERTA_LABEL_TO_PRESIDIO = {
     "PATORG": "ORGANIZATION",
     "LOC": "LOCATION",
     "OTHERPHI": "NRP",
+    "MAC_ADDRESS": "MAC_ADDRESS",
+    "SUB_ADDRESS": "SUB_ADDRESS",
 }
 
 
@@ -213,7 +215,7 @@ class PHIValidator:
         entities = getattr(
             settings,
             "PRESIDIO_ENTITIES",
-            ["PERSON", "PHONE_NUMBER", "US_SSN", "EMAIL_ADDRESS", "LOCATION", "ORGANIZATION"],
+            ["PERSON", "PHONE_NUMBER", "US_SSN", "EMAIL_ADDRESS", "LOCATION", "ORGANIZATION", "MAC_ADDRESS", "SUB_ADDRESS"],
         )
 
         try:

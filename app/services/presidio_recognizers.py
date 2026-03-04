@@ -24,10 +24,15 @@ TimeRecognizer = PatternRecognizer(
 )
 
 # HIPAA Category #4: Names of healthcare providers or facilities
-# Strictly match Proper Noun + Hospital. Case sensitive to avoid sentence capture.
 hospital_patterns = [
-    Pattern("Hospital", r"\b[A-Z][A-Za-z\s]{3,50}(?:Hospital|Clinic|Medical Center)\b", 0.95), 
-    Pattern("Healthcare", r"\b[A-Z][a-z]+\sHealthcare\b", 0.95),
+    Pattern(
+        "Hospital",
+        r"\b(?:[A-Z][a-z]+(?:'s?)?\s+){1,5}"
+        r"(?:Hospital|Clinic|Medical Center|Health Center|Health System|"
+        r"Medical Group|Diagnostic Laboratory|Recovery Center|Hospital Hospital)\b",
+        0.95
+    ),
+    Pattern("Healthcare Org", r"\b[A-Z][a-z]+\s+Healthcare\b", 0.95),
 ]
 
 HospitalRecognizer = PatternRecognizer(
@@ -63,18 +68,45 @@ FullNameRecognizer = PatternRecognizer(
 )
 
 # HIPAA Category #2: Geographic subdivisions
-VALID_STATES = "AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY"
+VALID_STATES = r"AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY"
 
-city_patterns = [
-    Pattern("City", r"\bHyderabad\b", 0.95),
-    # Strict City, State pattern
-    Pattern("City State", rf"\b[A-Z][a-z]+,\s*(?:{VALID_STATES})\b", 0.95),
+location_patterns = [
+    # City, State pairs
+    Pattern("City StateAbbr", rf"\b[A-Z][a-z]+(?:\s[A-Z][a-z]+){{0,2}},\s*(?:{VALID_STATES})\b", 0.99),
+    Pattern("City StateFull", r"\b[A-Z][a-z]+(?:\s[A-Z][a-z]+){{0,2}},\s*(?:Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|Delaware|Florida|Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|Kentucky|Louisiana|Maine|Maryland|Massachusetts|Michigan|Minnesota|Mississippi|Missouri|Montana|Nebraska|Nevada|New[ \t]Hampshire|New[ \t]Jersey|New[ \t]Mexico|New[ \t]York|North[ \t]Carolina|North[ \t]Dakota|Ohio|Oklahoma|Oregon|Pennsylvania|Rhode[ \t]Island|South[ \t]Carolina|South[ \t]Dakota|Tennessee|Texas|Utah|Vermont|Virginia|Washington|West[ \t]Virginia|Wisconsin|Wyoming)\b", 0.99),
 ]
 
-CityRecognizer = PatternRecognizer(
-    supported_entity="CITY",
-    patterns=city_patterns,
+LocationRecognizer = PatternRecognizer(
+    supported_entity="LOCATION",
+    patterns=location_patterns,
     global_regex_flags=re.MULTILINE | re.DOTALL
+)
+
+# MAC Address Detection
+mac_patterns = [
+    Pattern("MAC Colon", r"\b([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}\b", 0.99),
+    Pattern("MAC Dash", r"\b([0-9A-Fa-f]{2}-){5}[0-9A-Fa-f]{2}\b", 0.99),
+]
+MACAddressRecognizer = PatternRecognizer(
+    supported_entity="MAC_ADDRESS",
+    patterns=mac_patterns,
+    name="MAC_Address_Recognizer"
+)
+
+# Sub-Address Detection (Apartment, Suite, Room, Unit)
+sub_address_patterns = [
+    Pattern("Apartment", r"\bAp(?:art)?(?:ment|t)\.?\s*#?\s*\w{1,6}\b", 0.99),
+    Pattern("Suite", r"\bS(?:ui)?te\.?\s*#?\s*\w{1,6}\b", 0.99),
+    Pattern("Room Number", r"\bR(?:oo)?m\.?\s*#?\s*\d{1,4}[A-Za-z]?\b", 0.85),
+    Pattern("Floor", r"\bFl(?:oor)?\.?\s*#?\s*\d{1,3}[A-Za-z]?\b", 0.85),
+    Pattern("Unit", r"\bUnit\s*#?\s*\w{1,6}\b", 0.95),
+    Pattern("PO Box", r"\bP\.?\s*O\.?\s*Box\s+\d{1,6}\b", 0.99),
+]
+SubAddressRecognizer = PatternRecognizer(
+    supported_entity="SUB_ADDRESS",
+    patterns=sub_address_patterns,
+    context=["Address", "Location", "Resides", "Lives", "mailing"],
+    name="Sub_Address_Recognizer"
 )
 
 # HIPAA Category #1: DOB (excluding year)
@@ -87,12 +119,11 @@ DOBRecognizer = PatternRecognizer(
     patterns=dob_patterns
 )
 
-# HIPAA Category #2: Street Address
-# UPDATED: Use user-provided regex exactly and IGNORECASE w/ higher score
+# Street Address
 street_patterns = [
     Pattern(
         "Street Address",
-        r"\b\d{1,6}\s(?:[A-Za-z0-9]+\s){1,6}(?:Street|St|Avenue|Ave|Road|Rd|Blvd|Lane|Ln|Drive|Dr|Terrace|Way|Court|Ct)\b",
+        r"\b\d{1,6}\s(?:[A-Za-z0-9#-]+\s){1,6}(?:Street|St|Avenue|Ave|Road|Rd|Blvd|Lane|Ln|Drive|Dr|Terrace|Way|Court|Ct|Circle|Cir|Place|Pl)\b",
         0.99
     )
 ]
@@ -104,14 +135,9 @@ StreetRecognizer = PatternRecognizer(
     global_regex_flags=re.IGNORECASE | re.MULTILINE
 )
 
-# HIPAA Category #2: ZIP Code
-# UPDATED: Higher Score
+# ZIP Code
 zip_patterns = [
-    Pattern(
-        "ZIP Code",
-        r"\b\d{5}(?:-\d{4})?\b",
-        0.99
-    )
+    Pattern("ZIP Code", r"\b\d{5}(?:-\d{4})?\b", 0.99)
 ]
 
 ZipRecognizer = PatternRecognizer(
@@ -121,14 +147,20 @@ ZipRecognizer = PatternRecognizer(
     global_regex_flags=re.IGNORECASE | re.MULTILINE
 )
 
-# HIPAA Category #8: National Provider Identifier
-# UPDATED: Higher Score
+# Age Recognizer (Force match for redact check)
+age_patterns = [
+    Pattern("Age pattern", r"\b\d{1,3}\s*(?:year|yr)s?\s*old\b", 0.95),
+    Pattern("Age value", r"\bAge:\s*\d{1,3}\b", 0.95),
+]
+AgeRecognizer = PatternRecognizer(
+    supported_entity="AGE",
+    patterns=age_patterns,
+    context=["Age", "years", "old"]
+)
+
+# National Provider Identifier
 npi_patterns = [
-    Pattern(
-        "NPI",
-        r"\bNPI[:\s]*\d{10}\b",
-        0.99
-    )
+    Pattern("NPI", r"\bNPI[:\s]*\d{10}\b", 0.99)
 ]
 
 NPIRecognizer = PatternRecognizer(
@@ -138,13 +170,9 @@ NPIRecognizer = PatternRecognizer(
     global_regex_flags=re.IGNORECASE | re.MULTILINE
 )
 
-# HIPAA Category #? Insurance Policy
+# Insurance Policy
 insurance_patterns = [
-    Pattern(
-        "Insurance Policy",
-        r"\b[A-Z]{2,6}-[A-Z]{2,6}-\d{5,12}\b",
-        0.95
-    )
+    Pattern("Insurance Policy", r"\b[A-Z]{2,6}-[A-Z]{2,6}-\d{5,12}\b", 0.99)
 ]
 
 InsuranceRecognizer = PatternRecognizer(
@@ -154,11 +182,9 @@ InsuranceRecognizer = PatternRecognizer(
     global_regex_flags=re.IGNORECASE | re.MULTILINE
 )
 
-# --- NEW RECOGNIZERS FOR PII EDGE CASES ---
-
 # IP Address
 ip_patterns = [
-    Pattern("IPv4", r"\b(?:\d{1,3}\.){3}\d{1,3}\b", 0.95),
+    Pattern("IPv4", r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b", 0.99),
 ]
 IPRecognizer = PatternRecognizer(
     supported_entity="IP_ADDRESS",
@@ -191,7 +217,7 @@ EmergencyContactRecognizer = PatternRecognizer(
 
 # Device ID / Account Number
 account_patterns = [
-    Pattern("ID Pattern", r"\b[A-Z]{2,4}-\d{6,15}\b", 0.9),
+    Pattern("ID Pattern", r"\b[A-Z]{2,4}-\d{6,15}\b", 0.95),
 ]
 AccountRecognizer = PatternRecognizer(
     supported_entity="ID",

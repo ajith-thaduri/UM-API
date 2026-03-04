@@ -17,7 +17,7 @@ from app.core.config import settings
 from app.models.document_chunk import SectionType
 from app.services.llm.llm_factory import get_llm_service_instance, get_tier2_llm_service, get_tier1_llm_service, get_tier1_llm_service_for_user
 from app.services.prompt_service import prompt_service
-from app.services.date_shift_service import date_shift_service  # Legacy date shift (for backward compat)
+from app.services.date_shift_service import date_shift_service  # Stateless utility: only used in legacy non-two-tier path
 from app.services.presidio_deidentification_service import presidio_deidentification_service
 from app.services.phi_validator import PHILeakageError
 from app.repositories.user_preference_repository import UserPreferenceRepository

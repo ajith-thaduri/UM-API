@@ -52,7 +52,7 @@ from app.services.presidio_recognizers import (
     HospitalRecognizer,
     DoctorRecognizer,
     FullNameRecognizer,
-    CityRecognizer,
+    LocationRecognizer,
     DOBRecognizer,
     StreetRecognizer,
     ZipRecognizer,
@@ -64,7 +64,10 @@ from app.services.presidio_recognizers import (
     IPRecognizer,
     VehiclePlateRecognizer,
     PassportRecognizer,
-    DriversLicenseRecognizer
+    DriversLicenseRecognizer,
+    MACAddressRecognizer,
+    SubAddressRecognizer,
+    AgeRecognizer
 )
 from app.utils.safe_logger import get_safe_logger
 from presidio_anonymizer.entities import OperatorConfig
@@ -173,18 +176,30 @@ NER_BLOCKLIST = {
     "patient name", "patient", "name", "admission date", "discharge date",
     "medical record", "mrn", "case number", "account number", "health plan",
     "npi", "provider", "doctor", "staff", "attending", "emergency contact",
-    "secondary email", "alias", "alias used", "prior records", "result", "flag", "test",
+    "secondary email", "alias", "alias used", "alternative name", "alt name",
+    "prior records", "result", "flag", "test",
     "findings", "chest", "result flag", "date test", "physician", "date of birth",
     "dob", "ssn", "social security",
     "policy number", "group number", "health plan id", "case number", "admission",
     "discharge", "medical record number", "mrn number", "patient info",
+    "physician phone", "physician email", "physician name",
+    "physician fax", "patient phone", "patient email",
+    "patient address", "patient name", "emergency phone",
+    "emergency email", "contact phone", "contact email",
+    "home phone", "mobile phone", "work phone",
+    "home address", "work address", "mailing address",
+    "primary phone", "secondary phone", "primary email",
+    "medical encounter details", "encounter information",
+    "clinical summary", "discharge summary", "admission summary",
+    "patient demographics", "insurance information",
+    "billing information", "contact information",
 }
 
 # --- NER Quality Validation ---
 
-# Strict US phone number pattern — 5-digit ZIPs will never match
+# Comprehensive US phone number pattern (handles +1 and 1-)
 _PHONE_REGEX = re.compile(
-    r'^\(?\d{3}\)?[-. ]?\d{3}[-. ]?\d{4}$'
+    r'^(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}$'
 )
 
 # Valid street address: must START with a digit and END with a street suffix keyword
@@ -209,11 +224,20 @@ _MAX_ENTITY_SPAN = 50
 _MIN_ENTITY_CHARS = 3
 
 # Regex to detect honorific / credential suffix spans that are NOT standalone persons
-# e.g.  ', MD'  '(MD)'  'MD'  'DO'  'PhD'  'NP'
 _SUFFIX_ONLY_REGEX = re.compile(
     r'^[,()\s]*(?:MD|DO|PhD|NP|PA|RN|LPN|FNP|DNP|JD|MSW|LCSW)[.,()\s]*$',
     re.IGNORECASE
 )
+
+_USERNAME_REGEX = re.compile(r'^[a-z][a-z0-9._-]{3,}$', re.IGNORECASE)
+_FILENAME_REGEX = re.compile(r'\.\w{2,5}$', re.IGNORECASE)
+
+_MAX_SPAN_BY_TYPE = {
+    "PERSON": 40,
+    "ORGANIZATION": 60,
+    "LOCATION": 50,
+}
+_DEFAULT_MAX_SPAN = 60
 
 # --- Clinical Relevance Tiers ---
 
@@ -224,10 +248,10 @@ TOKENIZE_TYPES = {"PERSON", "ORGANIZATION"}
 STRIP_TYPES = {
     "ID", "PHONE_NUMBER", "EMAIL_ADDRESS", "US_SSN", "SSN",
     "LOCATION", "IP_ADDRESS", "URL", "PII", "ADDRESS",
-    "INSURANCE_ID", "NPI", "MRN", "PASSPORT", "AGE",
+    "INSURANCE_ID", "NPI", "MRN", "PASSPORT",
     "DRIVERS_LICENSE", "DEVICE_ID", "VEHICLE_PLATE",
     "ACCOUNT_NUMBER", "FAX", "NATIONAL_ID", "WEBSITE",
-    "ZIP_CODE", "STREET_ADDRESS", "CITY",
+    "ZIP_CODE", "STREET_ADDRESS", "CITY", "MAC_ADDRESS", "SUB_ADDRESS",
 }
 
 
@@ -331,7 +355,7 @@ class PresidioDeIdentificationService:
             HospitalRecognizer,
             DoctorRecognizer,
             FullNameRecognizer,
-            CityRecognizer,
+            LocationRecognizer,
             DOBRecognizer,
             StreetRecognizer,
             ZipRecognizer,
@@ -343,7 +367,10 @@ class PresidioDeIdentificationService:
             AccountRecognizer,
             VehiclePlateRecognizer,
             PassportRecognizer,
-            DriversLicenseRecognizer
+            DriversLicenseRecognizer,
+            MACAddressRecognizer,
+            SubAddressRecognizer,
+            AgeRecognizer
         ]
 
         if PRESIDIO_AVAILABLE:
@@ -485,7 +512,7 @@ class PresidioDeIdentificationService:
             
         for recognizer in self.custom_recognizers:
             # Check if already registered to avoid duplicates
-            entity_type = recognizer.supported_entities[0] if hasattr(recognizer, 'supported_entities') else None
+            entity_type = recognizer.supported_entities[0] if hasattr(recognizer, 'supported_entities') and recognizer.supported_entities else None
             if entity_type and entity_type not in registered_entities:
                 self.analyzer.registry.add_recognizer(recognizer)
                 safe_logger.debug(f"Registered custom recognizer: {entity_type}")
@@ -713,12 +740,26 @@ class PresidioDeIdentificationService:
                 raise
 
         # Step 9: Store in Privacy Vault
+        # Deactivate any existing active vaults for this case (e.g. reprocessing scenario).
+        # The partial unique index on (case_id) WHERE is_active=TRUE enforces one active vault.
+        existing_active = (
+            db.query(PrivacyVault)
+            .filter(PrivacyVault.case_id == case_id, PrivacyVault.is_active == True)
+            .all()
+        )
+        for old_vault in existing_active:
+            old_vault.is_active = False
+        if existing_active:
+            db.flush()
+            safe_logger.info(f"Deactivated {len(existing_active)} old vault(s) for case {case_id}")
+
         vault_entry = PrivacyVault(
             case_id=case_id,
             user_id=user_id,
             date_shift_days=shift_days,
             token_map=token_map,
             shifted_fields=shifted_fields,
+            is_active=True,
         )
         db.add(vault_entry)
         db.commit()
@@ -791,35 +832,29 @@ class PresidioDeIdentificationService:
         if patient_name:
             patient_identity = {"type": "PERSON", "canonical": patient_name, "variants": set()}
             
-            # 1a. Split canonical name into parts
+            # 1a. Create multi-word variants (NO single names)
             parts = patient_name.split()
-            if len(parts) >= 2:
-                for p in parts:
-                    if len(p) > 2: patient_identity["variants"].add(p)
+            if len(parts) >= 3:
+                # Henry Jonathan Matthews -> Henry Matthews, Henry Jonathan
+                patient_identity["variants"].add(f"{parts[0]} {parts[-1]}")
+                patient_identity["variants"].add(f"{parts[0]} {parts[1]}")
             
             # 1b. Add alias and its parts
             alias = case_metadata.get("Alias Used in Prior Records") or case_metadata.get("alias")
             if alias:
                 patient_identity["variants"].add(alias)
-                for a_part in alias.split():
-                    if len(a_part) > 2: patient_identity["variants"].add(a_part)
-                # Full variant combinations (Best effort)
-                if len(parts) > 0:
-                    patient_identity["variants"].add(f"{parts[0]} {alias}")
-                    patient_identity["variants"].add(f"{alias} {parts[-1]}")
+                a_parts = alias.split()
+                if len(a_parts) >= 2:
+                     patient_identity["variants"].add(f"{a_parts[0]} {a_parts[-1]}")
             
             patient_identity["variants"] = list(patient_identity["variants"])
             identities.append(patient_identity)
 
         # --- 2. PERSON: Provider ---
-        provider = case_metadata.get("provider") or case_metadata.get("provider_name")
+        provider = case_metadata.get("provider") or case_metadata.get("provider_name") or case_metadata.get("physician") or case_metadata.get("doctor")
         if provider:
-            provider_identity = {"type": "PERSON", "canonical": provider, "variants": set()}
-            parts = provider.replace("Dr.", "").replace("Doctor", "").split()
-            for p in parts:
-                if len(p) > 2:
-                    provider_identity["variants"].add(p)
-            provider_identity["variants"] = list(provider_identity["variants"])
+            provider_identity = {"type": "PERSON", "canonical": provider, "variants": []}
+            # No single-word variants for provider to avoid over-tokenization
             identities.append(provider_identity)
 
         # --- 3. PERSON: Emergency Contact ---
@@ -833,10 +868,17 @@ class PresidioDeIdentificationService:
             ec_identity["variants"] = list(ec_identity["variants"])
             identities.append(ec_identity)
 
-        # --- 4. ORGANIZATION: Facility ---
+        # --- 4. ORGANIZATION: Facility, Employer, Insurer ---
         facility = case_metadata.get("facility") or case_metadata.get("facility_name")
         if facility:
             identities.append({"type": "ORGANIZATION", "canonical": facility, "variants": []})
+
+        for org_key in ["employer", "employer_name", "company", "company_name", 
+                        "workplace", "insurance_provider", "insurance_company",
+                        "payer", "payer_name", "insurer", "bank", "bank_name"]:
+            org_val = case_metadata.get(org_key)
+            if org_val:
+                identities.append({"type": "ORGANIZATION", "canonical": org_val, "variants": []})
 
         # --- 5. STRIP: PII with zero clinical value ---
         strip_fields = [
@@ -857,6 +899,9 @@ class PresidioDeIdentificationService:
             k_lower = k.lower()
             if any(x in k_lower for x in ["email", "phone", "mobile", "home", "fax"]):
                 if v: strips.add(str(v))
+            if any(x in k_lower for x in ["employer", "company", "workplace", "insurer", "payer", "bank"]):
+                if v and isinstance(v, str):
+                    identities.append({"type": "ORGANIZATION", "canonical": v, "variants": []})
 
         safe_logger.info(f"Collected {len(identities)} identities and {len(strips)} strip values")
         return {
@@ -934,18 +979,65 @@ class PresidioDeIdentificationService:
         result = re.sub(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', "[[REDACTED]]", result)
         # URLs
         result = re.sub(r'https?://[^\s<>"]+|www\.[^\s<>"]+', "[[REDACTED]]", result)
-        # Phone numbers (US-centric)
-        result = re.sub(r'\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}', "[[REDACTED]]", result)
+        # Phone numbers (US-centric, handles +1 and 1-)
+        result = re.sub(r'(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}', "[[REDACTED]]", result)
         
         # --- HIPAA Hardening: Additional Safe Harbor Identifiers ---
         # SSN
         result = re.sub(r'\b\d{3}-\d{2}-\d{4}\b', "[[REDACTED]]", result)
+        # MAC Address
+        result = re.sub(r'\b([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b', "[[REDACTED]]", result)
         # IPv4
         result = re.sub(r'\b(?:\d{1,3}\.){3}\d{1,3}\b', "[[REDACTED]]", result)
+        # Credit Cards
+        result = re.sub(r'\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b', "[[REDACTED]]", result)
+        # VIN
+        result = re.sub(r'\b[A-HJ-NPR-Z0-9]{17}\b', "[[REDACTED]]", result)
+        # Countries (Safe harbor allows, but zero utility)
+        for country in ["United States", "USA", "U.S.", "U.S.A.", "United Kingdom", "UK"]:
+            result = re.sub(r'\b' + re.escape(country) + r'\b', "[[REDACTED]]", result, flags=re.I)
         # Vehicle Plates (common format)
         result = re.sub(r'\b[A-Z]{2}-[A-Z]{2,4}-\d{4}\b', "[[REDACTED]]", result)
         # Passport / Driver's License (Contextual fallback)
         result = re.sub(r'\b(?:Passport|License|DL)[:\s]*[A-Z]\d{6,9}\b', "[[REDACTED]]", result, flags=re.I)
+        # Sub-addresses (Apartment/Suite/Room) — catch before city/state to avoid partial overlap
+        result = re.sub(r'\bAp(?:art)?(?:ment|t)?\.?\s*#?\s*\w{1,6}\b', "[[REDACTED]]", result, flags=re.I)
+        result = re.sub(r'\bS(?:ui)?te\.?\s*#?\s*\w{1,6}\b', "[[REDACTED]]", result, flags=re.I)
+        result = re.sub(r'\bR(?:oo)?m\.?\s*#?\s*\d{1,4}[A-Za-z]?\b', "[[REDACTED]]", result, flags=re.I)
+        result = re.sub(r'\bUnit\s*#?\s*\w{1,6}\b', "[[REDACTED]]", result, flags=re.I)
+        # City, State pairs (e.g. 'Springfield, IL' / 'Austin, Texas')
+        _US_STATE_ABBR = (
+            r'AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MA|MD|'
+            r'MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|'
+            r'TX|UT|VT|VA|WA|WV|WI|WY'
+        )
+        _US_STATE_FULL = (
+            r'Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|Delaware|'
+            r'Florida|Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|Kentucky|Louisiana|'
+            r'Maine|Maryland|Massachusetts|Michigan|Minnesota|Mississippi|Missouri|Montana|'
+            r'Nebraska|Nevada|New\s+Hampshire|New\s+Jersey|New\s+Mexico|New\s+York|'
+            r'North\s+Carolina|North\s+Dakota|Ohio|Oklahoma|Oregon|Pennsylvania|'
+            r'Rhode\s+Island|South\s+Carolina|South\s+Dakota|Tennessee|Texas|Utah|Vermont|'
+            r'Virginia|Washington|West\s+Virginia|Wisconsin|Wyoming'
+        )
+        # "Springfield, IL" or "San Diego, CA"
+        result = re.sub(
+            rf'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){{0,2}},\s*(?:{_US_STATE_ABBR})\b',
+            "[[REDACTED]]", result
+        )
+        # "Springfield, Illinois" or "Austin, Texas"
+        result = re.sub(
+            rf'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){{0,2}},\s*(?:{_US_STATE_FULL})\b',
+            "[[REDACTED]]", result
+        )
+        # Ages ≥ 90 (HIPAA Safe Harbor requires ages ≥ 90 to be redacted)
+        def _redact_age_90plus(m):
+            try:
+                age_num = int(m.group(1))
+                return "90+ years old" if age_num >= 90 else m.group(0)
+            except (ValueError, IndexError):
+                return m.group(0)
+        result = re.sub(r'\b(\d{1,3})\s*years?\s*old\b', _redact_age_90plus, result, flags=re.IGNORECASE)
         
         # --- Stage 2: Known PHI / Identity Replacement ---
         replacements = []
@@ -1149,7 +1241,7 @@ class PresidioDeIdentificationService:
                     safe_logger.debug(f"Dropping {entity_type} for '{span_text}' — contains clinical words")
                     continue
 
-            # --- Issue 4: Email detected as PERSON ---
+            # --- Email detected as PERSON ---
             if entity_type == "PERSON":
                 # Direct @-check on the span text itself
                 if "@" in span_text:
@@ -1163,14 +1255,41 @@ class PresidioDeIdentificationService:
                 if overlaps_email:
                     safe_logger.debug(f"Dropping PERSON '{span_text}' — overlaps with email span")
                     continue
+                
+                # Reject spans with newlines or escaped newlines (for JSON payloads)
+                if "\n" in span_text or "\\n" in span_text:
+                    safe_logger.debug(f"Dropping PERSON '{span_text}' — contains newline")
+                    continue
 
-            # --- Issue 5: Multi-name block — span too large ---
-            # If a PERSON span is very long, it likely grouped repeated name references.
-            # We skip it here; the _replace_in_string / variant_token_map will handle
-            # the individual occurrences correctly from the known identity groups.
-            if entity_type == "PERSON" and (res.end - res.start) > _MAX_ENTITY_SPAN:
-                safe_logger.debug(f"Dropping oversized PERSON span ({res.end - res.start} chars) — likely name block")
+                # Username/Filename filter
+                # Match against the first word or entire trimmed span
+                # Usernames often appear in clinical portal logs
+                test_span = span_text.strip().split()[0] if span_text.strip() else ""
+                # Also check for characters that often appear in usernames but not names
+                if test_span and (
+                    _USERNAME_REGEX.match(test_span) or 
+                    any(c.isdigit() for c in test_span) or
+                    "_" in test_span
+                ) and " " not in span_text:
+                    safe_logger.debug(f"Dropping PERSON '{span_text}' — looks like username/id")
+                    continue
+                
+                if _FILENAME_REGEX.search(span_text):
+                    safe_logger.debug(f"Dropping PERSON '{span_text}' — looks like filename")
+                    continue
+
+            # --- Multi-name block — span too large ---
+            max_span = _MAX_SPAN_BY_TYPE.get(entity_type, _DEFAULT_MAX_SPAN)
+            if (res.end - res.start) > max_span:
+                safe_logger.debug(f"Dropping oversized {entity_type} span ({res.end - res.start} chars)")
                 continue
+
+            # --- LOCATION Filter ---
+            if entity_type in ("LOCATION", "CITY"):
+                # Reject pure numbers
+                if re.match(r'^\d+$', span_text.strip()): continue
+                # Reject time patterns in location
+                if re.search(r'\b\d{1,2}\s*(?:AM|PM)\b', span_text, re.IGNORECASE): continue
 
             # --- Pre-flight: discard credential suffixes (', MD', 'PhD', etc.) ---
             clean_span = span_text.strip(" ,.()")
@@ -1180,6 +1299,14 @@ class PresidioDeIdentificationService:
             if _SUFFIX_ONLY_REGEX.match(span_text):
                 safe_logger.debug(f"Dropping credential suffix '{span_text}' — not a standalone person")
                 continue
+
+            # --- SINGLE WORD PERSON FILTER ---
+            # If Stanford detects a single word as PERSON with mediocre score,
+            # and it's not a known identity, it's likely a false positive.
+            if entity_type == "PERSON" and " " not in span_text.strip():
+                 if res.score < 0.90:
+                      safe_logger.debug(f"Dropping low-score single-word PERSON '{span_text}'")
+                      continue
 
             sanitized.append(res)
 
@@ -1246,11 +1373,14 @@ class PresidioDeIdentificationService:
             safe_logger.warning(f"Presidio scan failed for field {key}: {e}")
 
     def _process_residual_phi_in_string(
-        self, text: str, analyzer_results: List[Any], token_map: Dict[str, str], shift_days: int = 0, score_threshold: float = 0.90
+        self, text: str, analyzer_results: List[Any], token_map: Dict[str, str], shift_days: int = 0, score_threshold: float = 0.85
     ) -> str:
         """
         Process late-discovered entities (from NER) using tokenize/strip tiers.
         Updates the global token_map for TOKENIZE types.
+        
+        IMPORTANT: Results must be sorted in REVERSE order (end → start) before calling.
+        This ensures replacements don't shift earlier positions.
         """
         if not analyzer_results:
             return text
@@ -1261,10 +1391,17 @@ class PresidioDeIdentificationService:
         # 2. Resolve overlaps using Longest-Wins strategy
         filtered = self._resolve_overlapping_spans(filtered)
         
-        # 3. Filter by threshold
-        filtered = [res for res in filtered if res.score >= score_threshold]
+        # 3. Filter by threshold (LOCATION gets lower floor of 0.80)
+        def passes_threshold(res):
+            entity_type = normalize_entity_type(res.entity_type)
+            if entity_type == "LOCATION":
+                return res.score >= min(score_threshold, 0.80)
+            return res.score >= score_threshold
+        filtered = [res for res in filtered if passes_threshold(res)]
         
-        # 4. Replace from end to start to maintain index offsets
+        # 4. Replace from END to START to maintain index offsets in original text
+        #    Since we make replacements to new_text using res.start/end from original text,
+        #    processing in reverse order guarantees positions before current span are intact.
         filtered.sort(key=lambda x: x.start, reverse=True)
         
         new_text = text
@@ -1273,22 +1410,41 @@ class PresidioDeIdentificationService:
             raw_type = res.entity_type
             entity_type = normalize_entity_type(raw_type)
             
-            # Final text check for block-list (headers)
-            entity_text = text[res.start:res.end].strip()
-            if not entity_text or len(entity_text) < 2: continue
+            # Read entity text from new_text using the same original offsets.
+            # This is safe because we process in reverse order, so characters
+            # at positions [res.start:res.end] haven't been touched yet.
+            entity_text = new_text[res.start:res.end].strip()
+            if not entity_text or len(entity_text) < 2:
+                continue
             
-            if entity_text.lower() in NER_BLOCKLIST:
+            # Block-list check (header labels, section titles, etc.)
+            if any(block.lower() in entity_text.lower() for block in NER_BLOCKLIST):
                 continue
 
             # --- TIER C: DATE HANDLING ---
             if entity_type == "DATE_TIME":
                 # We trust Stage 5 (Regex) to have shifted common date formats.
-                # Here we just 'Keep' the date so it isn't redacted.
-                # This prevents 'Double Shifting' while ensuring no redaction.
                 continue
 
+            # --- TIER D: AGE HANDLING (HIPAA Safe Harbor) ---
+            if entity_type == "AGE":
+                try:
+                    match_age = re.search(r'\d+', entity_text)
+                    if match_age:
+                        age_num = int(match_age.group())
+                        if age_num >= 90:
+                            new_text = new_text[:res.start] + "90+" + new_text[res.end:]
+                        # else: Keep as-is (allowed by HIPAA for ages < 90)
+                except (ValueError, AttributeError):
+                    pass
+                continue
+
+            # Reclassify ID → IP_ADDRESS if matches IPv4 pattern
+            if entity_type == "ID" and re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', entity_text):
+                entity_type = "IP_ADDRESS"
+
             # --- TIER B: STRIP ---
-            if entity_type in STRIP_TYPES or "@" in entity_text or "." in entity_text:
+            if entity_type in STRIP_TYPES or "@" in entity_text:
                 new_text = new_text[:res.start] + "[[REDACTED]]" + new_text[res.end:]
                 continue
                 
@@ -1311,14 +1467,23 @@ class PresidioDeIdentificationService:
                 for tok in token_map.keys():
                     if tok.startswith(prefix):
                         try:
-                            idx = int(tok[len(prefix):-2])
-                            if idx > max_idx: max_idx = idx
-                        except (ValueError, IndexError): pass
+                            match = re.search(rf'\[\[{entity_type}-(\d+)\]\]', tok)
+                            if match:
+                                idx = int(match.group(1))
+                                if idx > max_idx: max_idx = idx
+                        except (ValueError, IndexError):
+                            pass
                 
                 existing_token = f"[[{entity_type}-{max_idx+1:02d}]]"
                 token_map[existing_token] = entity_text
                 
             new_text = new_text[:res.start] + existing_token + new_text[res.end:]
+        
+        # Post-processing: Remove trailing duplicate Hospital suffix from organization tokens
+        new_text = re.sub(
+            r'(\[\[[A-Z_]+-\d{2,}\]\])\s+(?:Hospital|Medical Center|Clinic|Health Center|Health System)',
+            r'\1', new_text
+        )
             
         return new_text
 

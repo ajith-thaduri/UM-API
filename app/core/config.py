@@ -229,7 +229,7 @@ class Settings(BaseSettings):
         "LOCATION",
         "ORGANIZATION",
     ]
-    PRESIDIO_FREE_TEXT_THRESHOLD: float = 0.90  # High threshold: low FP is preferred over high recall
+    PRESIDIO_FREE_TEXT_THRESHOLD: float = 0.85  # Match user acceptance threshold
     PRESIDIO_PREFLIGHT_THRESHOLD: float = 0.90  # Match free-text for consistency
     
     # Token Format (UUID12 = 48 bits, ~281 trillion combinations)
