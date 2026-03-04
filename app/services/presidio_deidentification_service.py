@@ -72,7 +72,9 @@ from app.services.presidio_recognizers import (
     EmployerRecognizer,
     StateRecognizer,
     CountryRecognizer,
-    CreditCardRecognizer
+    CreditCardRecognizer,
+    UsernameRecognizer,
+    FilenameRecognizer
 )
 from app.utils.safe_logger import get_safe_logger
 from presidio_anonymizer.entities import OperatorConfig
@@ -164,12 +166,12 @@ ENTITY_TYPE_NORMALIZATION = {
     "FAX": "PHONE_NUMBER",
     "EMAIL_ADDRESS": "EMAIL_ADDRESS",
     "IP_ADDRESS": "IP_ADDRESS",
-    "URL": "PII",
-    "WEBSITE": "PII",
+    "URL": "URL",
+    "WEBSITE": "URL",
     
     # --- Other Categories ---
     "DATE_TIME": "DATE_TIME",
-    "TIME": "DATE_TIME",
+    "TIME": "TIME",
     "AGE": "AGE",
     "SEX": "AGE",
     "COORDINATE": "COORDINATE",
@@ -278,7 +280,7 @@ STRIP_TYPES = {
     "DRIVERS_LICENSE", "DEVICE_ID", "VEHICLE_PLATE",
     "ACCOUNT_NUMBER", "FAX", "NATIONAL_ID", "WEBSITE",
     "ZIP_CODE", "STREET_ADDRESS", "CITY", "MAC_ADDRESS", "SUB_ADDRESS",
-    "COORDINATE",
+    "COORDINATE", "TIME", "USERNAME", "FILENAME",
 }
 
 
@@ -403,7 +405,9 @@ class PresidioDeIdentificationService:
             EmployerRecognizer,
             StateRecognizer,
             CountryRecognizer,
-            CreditCardRecognizer
+            CreditCardRecognizer,
+            UsernameRecognizer,
+            FilenameRecognizer
         ]
 
         if PRESIDIO_AVAILABLE:
@@ -545,12 +549,15 @@ class PresidioDeIdentificationService:
             
         for recognizer in self.custom_recognizers:
             # Check if already registered to avoid duplicates
-            rec_name = recognizer.name if hasattr(recognizer, 'name') else None
+            # If no name, use supported_entity as name
+            rec_name = getattr(recognizer, 'name', None) or getattr(recognizer, 'supported_entity', None)
             if rec_name and rec_name not in registered_names:
                 self.analyzer.registry.add_recognizer(recognizer)
+                registered_names.append(rec_name)
                 safe_logger.debug(f"Registered custom recognizer: {rec_name}")
         
         safe_logger.info(f"Custom HIPAA recognizers registered. Total: {len(self.custom_recognizers)}")
+
 
     def switch_ner_engine(self, engine_type: str = None, model_id: str = None) -> Dict[str, Any]:
         """
@@ -1313,22 +1320,7 @@ class PresidioDeIdentificationService:
                     safe_logger.debug(f"Dropping PERSON '{span_text}' — contains newline")
                     continue
 
-                # Username/Filename filter
-                # Match against the first word or entire trimmed span
-                # Usernames often appear in clinical portal logs
-                test_span = span_text.strip().split()[0] if span_text.strip() else ""
-                # Also check for characters that often appear in usernames but not names
-                if test_span and (
-                    _USERNAME_REGEX.match(test_span) or 
-                    any(c.isdigit() for c in test_span) or
-                    "_" in test_span
-                ) and " " not in span_text:
-                    safe_logger.debug(f"Dropping PERSON '{span_text}' — looks like username/id")
-                    continue
-                
-                if _FILENAME_REGEX.search(span_text):
-                    safe_logger.debug(f"Dropping PERSON '{span_text}' — looks like filename")
-                    continue
+
 
             # --- Multi-name block — span too large ---
             max_span = _MAX_SPAN_BY_TYPE.get(entity_type, _DEFAULT_MAX_SPAN)
@@ -1532,6 +1524,12 @@ class PresidioDeIdentificationService:
                 entity_type = "IP_ADDRESS"
 
             # --- TIER B: STRIP ---
+            if raw_type == "ZIP_CODE":
+                # HIPAA-ish mask: 62704 -> 627**
+                masked = entity_text[:3] + "**" if len(entity_text) >= 3 else "**"
+                new_text = new_text[:res.start] + masked + new_text[res.end:]
+                continue
+
             if entity_type in STRIP_TYPES or "@" in entity_text:
                 new_text = new_text[:res.start] + "[[REDACTED]]" + new_text[res.end:]
                 continue

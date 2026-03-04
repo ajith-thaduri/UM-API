@@ -8,7 +8,8 @@ mrn_patterns = [
 
 MRNRecognizer = PatternRecognizer(
     supported_entity="MRN",
-    patterns=mrn_patterns
+    patterns=mrn_patterns,
+    name="MRN_Recognizer"
 )
 
 # HIPAA Element: Time 
@@ -20,14 +21,15 @@ time_patterns = [
 
 TimeRecognizer = PatternRecognizer(
     supported_entity="TIME",
-    patterns=time_patterns
+    patterns=time_patterns,
+    name="Time_Recognizer"
 )
 
 # HIPAA Category #4: Names of healthcare providers or facilities
 hospital_patterns = [
     Pattern(
         "Hospital",
-        r"\b(?:[A-Z][a-z]+(?:'s?)?\s+){1,5}"
+        r"\b(?:[A-Z][a-z.]+(?:'s?)?\s+){1,5}"
         r"(?:Hospital|Clinic|Medical Center|Health Center|Health System|"
         r"Medical Group|Diagnostic Laboratory|Recovery Center|Pharmacy)\b",
         0.95
@@ -38,7 +40,8 @@ hospital_patterns = [
 HospitalRecognizer = PatternRecognizer(
     supported_entity="HOSPITAL",
     patterns=hospital_patterns,
-    global_regex_flags=re.MULTILINE | re.DOTALL 
+    global_regex_flags=re.MULTILINE | re.DOTALL,
+    name="Hospital_Recognizer"
 )
 
 # Employers / Organizations
@@ -49,7 +52,8 @@ employer_patterns = [
 EmployerRecognizer = PatternRecognizer(
     supported_entity="ORGANIZATION",
     patterns=employer_patterns,
-    global_regex_flags=re.IGNORECASE | re.MULTILINE
+    global_regex_flags=re.IGNORECASE | re.MULTILINE,
+    name="Employer_Recognizer"
 )
 
 # HIPAA Category #1: Names (Doctors/Providers)
@@ -61,7 +65,8 @@ doctor_patterns = [
 DoctorRecognizer = PatternRecognizer(
     supported_entity="PROVIDER",
     patterns=doctor_patterns,
-    global_regex_flags=re.MULTILINE | re.DOTALL
+    global_regex_flags=re.MULTILINE | re.DOTALL,
+    name="Doctor_Recognizer"
 )
 
 # HIPAA Category #1: Full Patient Names
@@ -75,7 +80,8 @@ FullNameRecognizer = PatternRecognizer(
     supported_entity="PATIENT_FULL_NAME",
     patterns=name_patterns,
     context=["Patient", "Name", "Mr.", "Mrs.", "Miss", "Ms."],
-    global_regex_flags=re.MULTILINE | re.DOTALL
+    global_regex_flags=re.MULTILINE | re.DOTALL,
+    name="FullName_Recognizer"
 )
 
 # HIPAA Category #2: Geographic subdivisions
@@ -94,7 +100,8 @@ location_patterns = [
 LocationRecognizer = PatternRecognizer(
     supported_entity="CITY_FACILITY",
     patterns=location_patterns,
-    global_regex_flags=re.IGNORECASE | re.MULTILINE | re.DOTALL
+    global_regex_flags=re.IGNORECASE | re.MULTILINE | re.DOTALL,
+    name="Location_Recognizer"
 )
 
 state_patterns = [
@@ -102,7 +109,8 @@ state_patterns = [
 ]
 StateRecognizer = PatternRecognizer(
     supported_entity="LOCATION",
-    patterns=state_patterns
+    patterns=state_patterns,
+    name="State_Recognizer"
 )
 
 country_patterns = [
@@ -110,7 +118,8 @@ country_patterns = [
 ]
 CountryRecognizer = PatternRecognizer(
     supported_entity="LOCATION",
-    patterns=country_patterns
+    patterns=country_patterns,
+    name="Country_Recognizer"
 )
 
 # MAC Address Detection
@@ -147,7 +156,8 @@ dob_patterns = [
 
 DOBRecognizer = PatternRecognizer(
     supported_entity="DATE_TIME",
-    patterns=dob_patterns
+    patterns=dob_patterns,
+    name="DOB_Recognizer"
 )
 
 # Street Address
@@ -170,7 +180,8 @@ StreetRecognizer = PatternRecognizer(
     supported_entity="STREET_ADDRESS",
     patterns=street_patterns,
     context=["Address", "Location", "Resides", "Living"],
-    global_regex_flags=re.IGNORECASE | re.MULTILINE
+    global_regex_flags=re.IGNORECASE | re.MULTILINE,
+    name="Street_Recognizer"
 )
 
 # ZIP Code
@@ -182,7 +193,8 @@ ZipRecognizer = PatternRecognizer(
     supported_entity="ZIP_CODE",
     patterns=zip_patterns,
     context=["Zip", "Postal", "IL", "AZ", "NY", "CA", "TX"],
-    global_regex_flags=re.IGNORECASE | re.MULTILINE
+    global_regex_flags=re.IGNORECASE | re.MULTILINE,
+    name="Zip_Recognizer"
 )
 
 # Age Recognizer (Force match for redact check)
@@ -193,7 +205,8 @@ age_patterns = [
 AgeRecognizer = PatternRecognizer(
     supported_entity="AGE",
     patterns=age_patterns,
-    context=["Age", "years", "old"]
+    context=["Age", "years", "old"],
+    name="Age_Recognizer"
 )
 
 # National Provider Identifier
@@ -205,7 +218,8 @@ NPIRecognizer = PatternRecognizer(
     supported_entity="NPI",
     patterns=npi_patterns,
     context=["Provider", "NPI"],
-    global_regex_flags=re.IGNORECASE | re.MULTILINE
+    global_regex_flags=re.IGNORECASE | re.MULTILINE,
+    name="NPI_Recognizer"
 )
 
 # Insurance Policy
@@ -217,7 +231,8 @@ InsuranceRecognizer = PatternRecognizer(
     supported_entity="INSURANCE_ID", 
     patterns=insurance_patterns,
     context=["Policy", "Group", "Insurance", "BCBS", "Aetna", "Cigna", "United"],
-    global_regex_flags=re.IGNORECASE | re.MULTILINE
+    global_regex_flags=re.IGNORECASE | re.MULTILINE,
+    name="Insurance_Recognizer"
 )
 
 # IP Address
@@ -250,7 +265,8 @@ emergency_patterns = [
 EmergencyContactRecognizer = PatternRecognizer(
     supported_entity="PERSON",
     patterns=emergency_patterns,
-    context=["Emergency", "Spouse", "Contact", "Relationship"]
+    context=["Emergency", "Spouse", "Contact", "Relationship"],
+    name="EmergencyContact_Recognizer"
 )
 
 # Device ID / Account Number
@@ -298,11 +314,11 @@ DriversLicenseRecognizer = PatternRecognizer(
 
 # Coordinates (Latitude / Longitude)
 coordinate_patterns = [
-    # Decimal Degrees: 40.7128° N, 74.0060° W or just 40.7128, -74.0060
-    Pattern("Decimal Coordinates", r"\b-?\d{1,3}\.\d{4,10}[°\s]*,?\s*-?\d{1,3}\.\d{4,10}[°\s]*\b", 0.95),
+    # Decimal Degrees with Optional Direction: 40.7128 N, 74.0060 W
+    Pattern("Decimal Coordinates", r"\b-?\d{1,3}\.\d{4,10}\s*[NSEW]?\s*,?\s*-?\d{1,3}\.\d{4,10}\s*[NSEW]?\b", 0.95),
     # Labeled Decimal: Lat: 40.7128, Long: -74.0060
-    Pattern("Labeled Latitude", r"\bLat(?:itude)?[:\s]*-?\d{1,3}\.\d{4,10}\b", 0.95),
-    Pattern("Labeled Longitude", r"\bLong?(?:itude)?[:\s]*-?\d{1,3}\.\d{4,10}\b", 0.95),
+    Pattern("Labeled Latitude", r"\bLat(?:itude)?[:\s]*-?\d{1,3}\.\d{4,10}\s*[NS]?\b", 0.95),
+    Pattern("Labeled Longitude", r"\bLong?(?:itude)?[:\s]*-?\d{1,3}\.\d{4,10}\s*[EW]?\b", 0.95),
     # Degrees Minutes Seconds: 40° 42' 46" N
     Pattern("DMS Coordinates", r"\b\d{1,3}°\s*\d{1,2}'\s*\d{1,2}(?:\.\d+)?\"\s*[NSEW]\b", 0.95),
 ]
@@ -311,7 +327,8 @@ CoordinateRecognizer = PatternRecognizer(
     supported_entity="COORDINATE",
     patterns=coordinate_patterns,
     context=["coordinate", "location", "lat", "long", "gps"],
-    global_regex_flags=re.IGNORECASE | re.MULTILINE
+    global_regex_flags=re.IGNORECASE | re.MULTILINE,
+    name="Coordinate_Recognizer"
 )
 
 # Credit Cards
@@ -322,4 +339,23 @@ CreditCardRecognizer = PatternRecognizer(
     supported_entity="CREDIT_CARD",
     patterns=credit_card_patterns,
     context=["Credit", "Card", "Visa", "Mastercard", "Amex"]
+)
+# Usernames
+username_patterns = [
+    Pattern("Username", r"\b[a-z][a-z0-9._-]*[0-9._-]+[a-z0-9._-]*\b", 0.95)
+]
+UsernameRecognizer = PatternRecognizer(
+    supported_entity="USERNAME",
+    patterns=username_patterns,
+    context=["user", "username", "login", "portal"]
+)
+
+# Patient Filenames
+filename_patterns = [
+    Pattern("Image Filename", r"\b[a-z0-9._-]+\.(?:jpg|jpeg|png|gif|pdf|doc|docx|txt)\b", 0.85)
+]
+FilenameRecognizer = PatternRecognizer(
+    supported_entity="FILENAME",
+    patterns=filename_patterns,
+    context=["file", "photo", "image", "upload", "attachment"]
 )
