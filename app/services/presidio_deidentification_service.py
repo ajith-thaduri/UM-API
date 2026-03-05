@@ -1495,7 +1495,15 @@ class PresidioDeIdentificationService:
             results = self._sanitize_ner_results(results, text)
 
             # 3. Filter already tokenized spans (those replaced by _replace_in_string)
-            results = [res for res in results if "[[" not in text[res.start:res.end]]
+            # Find all [[TOKEN]] markers in current text to avoid partial or nested redaction
+            token_markers = [(m.start(), m.end()) for m in re.finditer(r'\[\[.*?\]\]', text)]
+
+            def overlaps_any_token(r_s, r_e):
+                for ts, te in token_markers:
+                    if not (r_e <= ts or r_s >= te): return True
+                return False
+
+            results = [res for res in results if not overlaps_any_token(res.start, res.end)]
             if not results:
                 return
 
@@ -1553,7 +1561,9 @@ class PresidioDeIdentificationService:
 
             # --- TIER C: DATE HANDLING ---
             if entity_type == "DATE_TIME":
-                # We trust Stage 5 (Regex) to have shifted common date formats.
+                # Attempt a safety shift for any date missed by the primary regex shifter
+                shifted_date_text = self._shift_dates_in_text(entity_text, shift_days)
+                new_text = new_text[:res.start] + shifted_date_text + new_text[res.end:]
                 continue
 
             # --- TIER D: AGE HANDLING (HIPAA Safe Harbor) ---
@@ -1615,11 +1625,14 @@ class PresidioDeIdentificationService:
                 
             new_text = new_text[:res.start] + existing_token + new_text[res.end:]
         
-        # Post-processing: Remove trailing duplicate Hospital suffix from organization tokens
+        # Post-processing: 
+        # 1. Remove trailing duplicate Hospital suffix from organization tokens
         new_text = re.sub(
             r'(\[\[[A-Z_]+-\d{2,}\]\])\s+(?:Hospital|Medical Center|Clinic|Health Center|Health System)',
             r'\1', new_text
         )
+        # 2. Consolidate adjacent [[REDACTED]] tokens
+        new_text = re.sub(r'(\[\[REDACTED\]\]\s*)+', '[[REDACTED]] ', new_text).strip()
             
         return new_text
 

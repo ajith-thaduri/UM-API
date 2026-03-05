@@ -54,6 +54,9 @@ CASE_METADATA = {
     "account_number": "ACC-55667788",
     "health_plan_id": "HP-9988776655",
     "city": "Springfield",
+    "alias_v2": "Johnnie Doe",
+    "apartment": "Apartment 5B",
+    "mac": "00:1B:44:11:3A:B7",
 }
 
 # All 18 Safe Harbor categories embedded in realistic clinical narrative
@@ -63,6 +66,7 @@ CASE METADATA
 Patient Name: John Michael Doe
 Alias Used in Prior Records: Johnny Doe
 Date of Birth: 03/14/1980
+Age: 44 years old
 SSN: 123-45-6789
 Medical Record Number (MRN): 000123456
 Case Number: BC-2025-000123456
@@ -72,7 +76,9 @@ NPI (Attending): 1548273645
 
 Address:
 742 Evergreen Terrace
+Apartment 5B
 Springfield, IL 62704
+United States
 
 Phone (Home): (217) 555-7890
 Phone (Mobile): (217) 555-1122
@@ -80,18 +86,28 @@ Email: john.doe@email.com
 Secondary Email: jdoe1980@gmail.com
 
 Emergency Contact:
-Jane Doe (Spouse)
+Jane Doe, MD (Spouse)
 Phone: (217) 555-3344
 Email: jane.doe@email.com
+
+CHIEF COMPLAINT & HISTORY
+
+The patient reports a three-day history of progressive dyspnea on exertion, accompanied by a non-productive cough and mild orthopnea. He denies any chest pain, palpitations, or lightheadedness. On baseline, he is able to walk two blocks without limitation, but now he feels winded after less than twenty feet. He has noticed a weight gain of approximately seven pounds over the past week, consistent with peripheral edema. He has a past medical history significant for stage 2 hypertension, managed with Lisinopril, and type 2 diabetes mellitus, controlled with Metformin. He specifies that he has been compliant with his medications, although he did consume a higher-than-usual amount of sodium over the weekend during a family gathering.
 
 ADMISSION RECORD
 
 John Michael Doe was admitted to St. Mary's Regional Medical Center on 03/02/2025 under the care of Dr. Michael Smith, MD (NPI: 1548273645).
 
-Johnny Doe presented with shortness of breath. MRN 000123456 confirms prior visit in 2023 for hypertension.
+Johnny Doe presented with shortness of breath. MRN 000123456 confirms prior visit in 2023 for hypertension. Alias: Johnnie Doe.
+
+Registration time: 09:32 AM.
 
 Admission Date: 03/02/2025
 Discharge Date: 03/09/2025
+
+PHYSICAL EXAMINATION
+
+Physical examination reveals a well-developed, well-nourished male in no acute distress but appearing slightly tachypneic. Vital signs are as noted above. Neck examination reveals a moderately elevated jugular venous pressure (JVP) at 11 cm H2O. Cardiac auscultation shows a regular rate and rhythm with a soft S3 gallop and a grade II/VI systolic murmur at the apex. Lung auscultation demonstrates fine bibasilar crackles extending one-third of the way up the lung fields. Abdominal examination is unremarkable with no hepatomegaly. Lower extremities show 2+ pitting edema up to the mid-shins. Neuro examination is non-focal. Extremities are warm to the touch and peripheral pulses are intact.
 
 CLINICAL NOTES
 
@@ -102,7 +118,7 @@ Physical therapy evaluation 03/06/2025:
 Patient John Michael Doe ambulated 25 feet with assistance.
 
 Social History:
-Lives with spouse Jane Doe at 742 Evergreen Terrace.
+Lives with spouse Jane Doe at 742 Evergreen Terrace in San Diego, California.
 Works at Springfield Nuclear Power Plant. Employer ID: EMP-887766.
 Insurance: Blue Cross Blue Shield of Illinois, Policy: BCBS-4433221100.
 
@@ -130,6 +146,11 @@ ADDITIONAL PII EDGE CASES
 
 IP Address: 192.168.1.45
 Device ID: DEV-1122334455
+MAC Address: 00:1B:44:11:3A:B7
+MAC (Dash): 00-1B-44-11-3A-B7
+Coordinates: 39.7817 N, 89.6501 W
+Portal username: anya.peterson85 / hospital_user_99
+File: patient_photo_chest_xray.jpg
 Driver's License: D1234567 (Illinois)
 Vehicle Plate: IL-ABC-7890
 Passport: X12345678
@@ -156,13 +177,16 @@ SAFE_HARBOR_CHECKS = {
     "1_Names": [
         ("Patient Name", "John Michael Doe"),
         ("Patient Alias", "Johnny Doe"),
+        ("Patient Alias V2", "Johnnie Doe"),
         ("Provider Name", "Dr. Michael Smith"),
         ("Emergency Contact", "Jane Doe"),
     ],
     "2_Geography": [
         ("Street Address", "742 Evergreen Terrace"),
-        # Note: City names >40k population are technically permitted under Safe Harbor.
-        # We test for it as a best-effort check, but it's a warning, not a hard fail.
+        ("City San Diego", "San Diego"),
+        ("City California", "California"),
+        ("Country", "United States"),
+        ("Apartment", "Apartment 5B"),
         ("ZIP Code", "62704"),
     ],
     "3_Dates": [
@@ -203,21 +227,29 @@ SAFE_HARBOR_CHECKS = {
     ],
     "13_DeviceID": [
         ("Device ID", "DEV-1122334455"),
+        ("MAC", "00:1B:44:11:3A:B7"),
+        ("MAC Dash", "00-1B-44-11-3A-B7"),
     ],
     "14_URL": [
         ("Website", "www.johndoehealthrecords.com"),
+        ("Username 1", "anya.peterson85"),
+        ("Username 2", "hospital_user_99"),
     ],
     "15_IPAddress": [
         ("IP Address", "192.168.1.45"),
     ],
     "16_Biometric": [],     # Not applicable in text
-    "17_Photos": [],         # Not applicable in text
+    "17_Photos": [
+        ("Filename", "patient_photo_chest_xray.jpg"),
+    ],
     "18_UniqueID": [
         ("Passport", "X12345678"),
         ("NPI", "1548273645"),
         ("Insurance Policy", "BCBS-4433221100"),
         ("Employer ID", "EMP-887766"),
         ("Case Number", "BC-2025-000123456"),
+        ("Coordinate", "39.7817 N"),
+        ("Time", "09:32 AM"),
     ],
 }
 
