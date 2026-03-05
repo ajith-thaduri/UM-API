@@ -122,15 +122,24 @@ NER_EXACT_BLOCKLIST: set = {
     "vehicle information", "online references", "personal website", "notes",
     "gender", "male", "female", "office address", "hospital address",
     "hospital name", "attending physician", "referring physician",
-    "primary nurse", "appointment time", "emergency contact",
+    "primary nurse", "appointment time",
     "health insurance", "insurance provider", "employee id",
     "laboratory accession", "radiology report", "encounter id",
-    "prescription number", "patient portal", "login ip", "device id",
-    "vehicle vin", "parking permit", "linkedin profile",
+    "prescription number", "login ip", "device id",
+    "vehicle vin", "linkedin profile",
     "credit card", "bank account", "routing number", "billing account",
     "email address", "work email", "phone number", "alternate phone",
     "fax number", "driver license", "passport number",
     "pacemaker model", "serial number", "model number",
+    
+    # Comprehensive Edge Cases
+    "alias name", "beneficiary number", "browser fingerprint",
+    "biometric authentication", "primary vehicle", "vehicle owner",
+    "vehicle make", "vehicle model", "vehicle year", "vehicle color",
+    "license plate", "vehicle identification", "parking permit",
+    "card number", "expiration date", "billing address", "visit date",
+    "room number", "bed number", "face scan", "lab order", "test date",
+    "sample id", "laboratory facility", "claim number", "group id"
 }
 
 NER_PHRASE_BLOCKLIST: set = {
@@ -140,6 +149,8 @@ NER_PHRASE_BLOCKLIST: set = {
     "parkinson", "parkinson's", "crohn", "crohn's", "raynaud", "raynaud's",
     "alzheimer", "alzheimer's", "huntington", "huntington's", "glasgow coma",
     "glasgow", "medtronic", "azure", "medicare",
+    "county", "patient portal", "employer name", "biometric authentication token",
+    "discharge instructions", "midwest diagnostic", "senior software engineer", "senior software"
 }
 
 # ── Compiled regexes used by NER sanitizer ────────────────────────────────────

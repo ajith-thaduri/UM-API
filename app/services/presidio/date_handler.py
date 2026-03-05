@@ -76,7 +76,7 @@ def shift_dates_structured(
         elif isinstance(obj, list):
             return [_recurse(item, f"{current_path}[{i}]") for i, item in enumerate(obj)]
         elif isinstance(obj, str):
-            return shift_dates_in_text(obj, shift_days)
+            return obj
         return obj
 
     shifted_data = _recurse(data, path)

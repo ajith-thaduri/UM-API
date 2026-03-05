@@ -269,25 +269,32 @@ EmergencyContactRecognizer = PatternRecognizer(
     name="EmergencyContact_Recognizer"
 )
 
-# Device ID / Account Number
+# Device ID / Account Number / Auth Tokens
 account_patterns = [
     Pattern("ID Pattern", r"\b[A-Z]{2,4}-\d{6,15}\b", 0.95),
+    Pattern("Dev ID Pattern", r"\bDEV-\d{5,10}\b", 0.95),
+    Pattern("BF Pattern", r"\bBF-\d{6,15}\b", 0.95),
+    Pattern("FaceScan Pattern", r"\bFACESCAN-\d{4}-\d{4}\b", 0.95),
+    Pattern("BioToken Pattern", r"\bBIO-\d{6,12}\b", 0.95),
 ]
 AccountRecognizer = PatternRecognizer(
     supported_entity="ID",
     patterns=account_patterns,
-    context=["ID", "Account", "Device", "Passport", "License"],
+    context=["ID", "Account", "Device", "Passport", "License", "Fingerprint", "Scan", "Authentication", "Token"],
     name="Account_Recognizer"
 )
 
-# Vehicle Plate (HIPAA Category #15)
+# Vehicle Plate (HIPAA Category #15) / VIN / Parking
 vehicle_patterns = [
     Pattern("Vehicle Plate", r"\b[A-Z]{2}-[A-Z]{2,4}-\d{4}\b", 0.95),
+    Pattern("State Plate", r"\b[A-Z]{2}-\d{4}-[A-Z]{2}\b", 0.95),
+    Pattern("VIN", r"\b[A-HJ-NPR-Z0-9]{17}\b", 0.95),
+    Pattern("Parking Permit", r"\bPP-\d{4,8}\b", 0.95),
 ]
 VehiclePlateRecognizer = PatternRecognizer(
     supported_entity="VEHICLE_PLATE",
     patterns=vehicle_patterns,
-    context=["Plate", "Vehicle", "VIN", "License Plate"],
+    context=["Plate", "Vehicle", "VIN", "License Plate", "Parking", "Permit"],
     name="Vehicle_Plate_Recognizer"
 )
 
@@ -332,15 +339,23 @@ CoordinateRecognizer = PatternRecognizer(
     name="Coordinate_Recognizer"
 )
 
-# Credit Cards
+# Credit Cards & Payments
 credit_card_patterns = [
-    Pattern("Credit Card", r"\b(?:\d{4}[-\s]?){3}\d{4}\b", 0.95)
+    Pattern("Credit Card", r"\b(?:\d{4}[-\s]?){3}\d{4}\b", 0.95),
 ]
 CreditCardRecognizer = PatternRecognizer(
     supported_entity="CREDIT_CARD",
     patterns=credit_card_patterns,
     context=["Credit", "Card", "Visa", "Mastercard", "Amex"],
     name="CreditCard_Recognizer"
+)
+cvv_patterns = [
+    Pattern("CVV", r"\bCVV[:\s]*\d{3,4}\b", 0.99)
+]
+CVVRecognizer = PatternRecognizer(
+    supported_entity="ID", 
+    patterns=cvv_patterns,
+    name="CVV_Recognizer"
 )
 # Usernames
 username_patterns = [
@@ -375,6 +390,31 @@ AliasRecognizer = PatternRecognizer(
     name="Alias_Recognizer"
 )
 
+# Claims and Policy Numbers
+claim_patterns = [
+    Pattern("Policy", r"\bPOL-\d{6,10}\b", 0.95),
+    Pattern("Claim", r"\bCLM-\d{5,10}\b", 0.95),
+    Pattern("Group", r"\bGRP-\d{4,10}\b", 0.95),
+]
+ClaimRecognizer = PatternRecognizer(
+    supported_entity="ID",
+    patterns=claim_patterns,
+    context=["Claim", "Policy", "Group"],
+    name="Claim_Recognizer"
+)
+
+# Lab Orders and Sample IDs
+lab_patterns = [
+    Pattern("Lab Order", r"\bLAB-\d{4,10}\b", 0.95),
+    Pattern("Sample ID", r"\bSMP-\d{4,10}\b", 0.95),
+]
+LabRecognizer = PatternRecognizer(
+    supported_entity="ID",
+    patterns=lab_patterns,
+    context=["Lab", "Order", "Sample", "Test"],
+    name="Lab_Recognizer"
+)
+
 # ── Aggregated list of all custom recognizer instances ────────────────────────
 ALL_RECOGNIZERS = [
     MRNRecognizer,
@@ -403,7 +443,10 @@ ALL_RECOGNIZERS = [
     StateRecognizer,
     CountryRecognizer,
     CreditCardRecognizer,
+    CVVRecognizer,
     UsernameRecognizer,
     FilenameRecognizer,
     AliasRecognizer,
+    ClaimRecognizer,
+    LabRecognizer,
 ]
