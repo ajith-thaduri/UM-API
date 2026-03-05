@@ -131,15 +131,39 @@ NER_EXACT_BLOCKLIST: set = {
     "email address", "work email", "phone number", "alternate phone",
     "fax number", "driver license", "passport number",
     "pacemaker model", "serial number", "model number",
-    
-    # Comprehensive Edge Cases
+    # Comprehensive Edge Cases — general labels
     "alias name", "beneficiary number", "browser fingerprint",
     "biometric authentication", "primary vehicle", "vehicle owner",
     "vehicle make", "vehicle model", "vehicle year", "vehicle color",
     "license plate", "vehicle identification", "parking permit",
     "card number", "expiration date", "billing address", "visit date",
     "room number", "bed number", "face scan", "lab order", "test date",
-    "sample id", "laboratory facility", "claim number", "group id"
+    "sample id", "laboratory facility", "claim number", "group id",
+    # Address / location labels
+    "home address", "secondary address", "third address", "mailing address",
+    "hospital address", "office address", "billing address", "street address",
+    "zip code", "county", "state", "country",
+    # Device / network labels
+    "mac address", "mac alt format", "alt format", "ip address",
+    "ipv6", "device id", "browser fingerprint id", "face scan id",
+    "biometric token", "biometric authentication token",
+    # Vehicle / ID labels and parking
+    "vin", "plate", "parking", "parking permit id",
+    "vehicle identification number",
+    # Payment labels
+    "card holder", "credit card holder", "card number",
+    "expiration date", "cvv", "billing address",
+    # Lab / test labels
+    "lab order id", "sample id", "test date", "laboratory facility",
+    # Insurance / claim labels
+    "policy number", "claim number", "health plan", "group id",
+    "insurance claim information", "insurance provider",
+    # Miscellaneous
+    "discharge instructions", "follow-up", "primary vehicle",
+    "additional vehicle", "additional pii edge cases",
+    "repeated phi stress section", "chief complaint",
+    "physical examination", "medications", "allergies",
+    "social history", "case metadata",
 }
 
 NER_PHRASE_BLOCKLIST: set = {
@@ -150,7 +174,31 @@ NER_PHRASE_BLOCKLIST: set = {
     "alzheimer", "alzheimer's", "huntington", "huntington's", "glasgow coma",
     "glasgow", "medtronic", "azure", "medicare",
     "county", "patient portal", "employer name", "biometric authentication token",
-    "discharge instructions", "midwest diagnostic", "senior software engineer", "senior software"
+    "discharge instructions", "midwest diagnostic", "senior software engineer",
+    "senior software", "alt format", "mac alt",
+}
+
+# ── Field-label stop-words (Rule 11 in sanitizer) ─────────────────────────────
+# Words that are NEVER parts of real human names — if PERSON text is composed
+# ENTIRELY of these words, drop it.
+FIELD_LABEL_STOP_WORDS: set = {
+    "address", "account", "alt", "authentication", "biometric", "billing",
+    "browser", "card", "claim", "color", "contact", "country", "county",
+    "credit", "cvv", "date", "device", "discharge", "driver", "email",
+    "emergency", "employer", "expiration", "facility", "fax", "fingerprint",
+    "floor", "format", "group", "health", "holder", "home", "hospital",
+    "id", "identification", "information", "insurance", "ip", "lab",
+    "laboratory", "license", "mac", "make", "medical", "mobile",
+    "model", "name", "network", "number", "order", "owner", "parking",
+    "passport", "patient", "payment", "permit", "phone", "plan",
+    "plate", "policy", "portal", "primary", "record", "room",
+    "sample", "scan", "secondary", "security", "social", "state",
+    "suite", "summary", "test", "third", "token", "unit", "url",
+    "username", "vehicle", "vin", "visit", "year", "zip",
+    "additional", "alt", "bed", "beneficiary", "chief", "clinical",
+    "complaint", "edge", "examination", "follow-up", "history",
+    "instructions", "medications", "notes", "physical", "pii",
+    "repeated", "section", "stress", "type",
 }
 
 # ── Compiled regexes used by NER sanitizer ────────────────────────────────────

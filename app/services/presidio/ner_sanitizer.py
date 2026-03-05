@@ -13,7 +13,7 @@ from typing import Any, List
 
 from app.utils.safe_logger import get_safe_logger
 from .constants import (
-    NER_EXACT_BLOCKLIST, NER_PHRASE_BLOCKLIST,
+    NER_EXACT_BLOCKLIST, NER_PHRASE_BLOCKLIST, FIELD_LABEL_STOP_WORDS,
     _PHONE_REGEX, _STREET_REGEX, _CLINICAL_CONTEXT_WORDS,
     _MAX_ENTITY_SPAN, _MIN_ENTITY_CHARS,
     _SUFFIX_ONLY_REGEX, _CREDENTIALS_TRIM_REGEX, _HONORIFIC_PREFIX_REGEX,
@@ -172,6 +172,13 @@ def sanitize_ner_results(results: List[Any], text: str) -> List[Any]:
         # ── 10. Single-word low-score PERSON ──────────────────────────────────
         if entity_type == "PERSON" and " " not in span_text.strip():
             if res.score < 0.90:
+                continue
+
+        # ── 11. Field-label stop-word filter ─────────────────────────────────
+        if entity_type == "PERSON":
+            words = set(re.findall(r"\w+", span_text.lower()))
+            if words and words.issubset(FIELD_LABEL_STOP_WORDS):
+                safe_logger.debug(f"Dropping PERSON '{span_text}' — looks like a field label")
                 continue
 
         sanitized.append(res)
