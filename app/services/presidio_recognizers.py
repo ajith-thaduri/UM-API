@@ -88,11 +88,11 @@ FullNameRecognizer = PatternRecognizer(
 VALID_STATES = r"AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|MA|MD|ME|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY"
 
 location_patterns = [
-    # City, State pairs
+    # City, State pairs (same line — with comma separation)
     Pattern("City StateAbbr", rf"\b[A-Z][a-z]+(?:\s[A-Z][a-z]+){{0,2}},\s*(?:{VALID_STATES})\b", 0.99),
     Pattern("City StateFull", r"\b[A-Z][a-z]+(?:\s[A-Z][a-z]+){{0,2}},\s*(?:Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|Delaware|Florida|Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|Kentucky|Louisiana|Maine|Maryland|Massachusetts|Michigan|Minnesota|Mississippi|Missouri|Montana|Nebraska|Nevada|New[ \t]Hampshire|New[ \t]Jersey|New[ \t]Mexico|New[ \t]York|North[ \t]Carolina|North[ \t]Dakota|Ohio|Oklahoma|Oregon|Pennsylvania|Rhode[ \t]Island|South[ \t]Carolina|South[ \t]Dakota|Tennessee|Texas|Utah|Vermont|Virginia|Washington|West[ \t]Virginia|Wisconsin|Wyoming)\b", 0.99),
-    # Lone Cities (Commonly missed or ambiguous)
-    Pattern("Major Cities", r"\b(?:Washington|Buffalo|Chicago|Austin|Seattle|Boston|Atlanta|Dallas|Denver|Houston|Miami|Phoenix|Philadelphia|Detroit|Minneapolis|Pittsburgh)\b", 0.85),
+    # Lone Cities — extended with more common US cities
+    Pattern("Major Cities", r"\b(?:Washington|Buffalo|Chicago|Austin|Seattle|Boston|Atlanta|Dallas|Denver|Houston|Miami|Phoenix|Philadelphia|Detroit|Minneapolis|Pittsburgh|San Diego|San Francisco|San Jose|San Antonio|Los Angeles|New York|Las Vegas|Portland|Sacramento|Springfield|Jacksonville|Memphis|Nashville|Louisville|Baltimore|Milwaukee|Albuquerque|Tucson|Fresno|Mesa|Omaha|Raleigh|Cleveland|Arlington|Tampa|New Orleans|Bakersfield|Honolulu|Anaheim|Aurora|Santa Ana|Corpus Christi|Riverside|Lexington|Stockton|Henderson|Saint Paul|Cincinnati|Greensboro|Pittsburgh|St\. Louis|Lincoln|Orlando|Irvine|Durham|Madison|Fort Worth|El Paso|Columbus|Charlotte|Indianapolis)\b", 0.90),
     # Locations like 'Shelter', 'Clinic'
     Pattern("Facility Word", r"\b(?:Homeless Shelter|Recovery Center|Nursing Home|Care Facility)\b", 0.85),
 ]
@@ -362,4 +362,15 @@ FilenameRecognizer = PatternRecognizer(
     patterns=filename_patterns,
     context=["file", "photo", "image", "upload", "attachment"],
     name="Filename_Recognizer"
+)
+
+# Alias / AKA detection (explicitly labeled alternative names)
+alias_patterns = [
+    Pattern("Alias Label", r"\b(?:Alias|AKA|Also known as|Goes by)[:\s]+([A-Z][a-z]+(?:\s[A-Z][a-z]+){0,3})\b", 0.99),
+]
+AliasRecognizer = PatternRecognizer(
+    supported_entity="PERSON",
+    patterns=alias_patterns,
+    context=["alias", "aka", "known", "name"],
+    name="Alias_Recognizer"
 )

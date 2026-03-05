@@ -74,7 +74,8 @@ from app.services.presidio_recognizers import (
     CountryRecognizer,
     CreditCardRecognizer,
     UsernameRecognizer,
-    FilenameRecognizer
+    FilenameRecognizer,
+    AliasRecognizer
 )
 from app.utils.safe_logger import get_safe_logger
 from presidio_anonymizer.entities import OperatorConfig
@@ -198,8 +199,21 @@ NER_EXACT_BLOCKLIST = {
     "clinical summary", "discharge summary", "admission summary",
     "insurance information",
     "billing information", "contact information",
+    # Document structural labels
+    "financial information", "biometric identifiers", "medical identifiers",
+    "vehicle information", "online references", "personal website", "notes",
+    "gender", "male", "female", "office address", "hospital address",
+    "hospital name", "attending physician", "referring physician",
+    "primary nurse", "appointment time", "emergency contact",
+    "health insurance", "insurance provider", "employee id",
+    "laboratory accession", "radiology report", "encounter id",
+    "prescription number", "patient portal", "login ip", "device id",
+    "vehicle vin", "parking permit", "linkedin profile",
+    "credit card", "bank account", "routing number", "billing account",
+    "email address", "work email", "phone number", "alternate phone",
+    "fax number", "driver license", "passport number",
     # Device / equipment labels
-    "pacemaker model", "serial number", "device id", "model number",
+    "pacemaker model", "serial number", "model number",
 }
 
 # Clinical phrases/eponyms that can be matched anywhere inside an entity
@@ -407,7 +421,8 @@ class PresidioDeIdentificationService:
             CountryRecognizer,
             CreditCardRecognizer,
             UsernameRecognizer,
-            FilenameRecognizer
+            FilenameRecognizer,
+            AliasRecognizer,
         ]
 
         if PRESIDIO_AVAILABLE:
@@ -1322,6 +1337,26 @@ class PresidioDeIdentificationService:
 
 
 
+            # --- PATIENT_FULL_NAME label / structural field filter ---
+            # The 'Contextual Full Name' pattern fires on any two capitalized words
+            # including headers like 'Credit Card', 'Hospital Name', 'Primary Nurse'.
+            # Drop these when they look like field labels (contain colon in original,
+            # or their lowercased form is a known structural label).
+            if entity_type == "PATIENT_FULL_NAME":
+                clean_lower = span_text.lower().strip(" :.\n")
+                # Drop if it exactly matches or contains a blocklist term
+                if clean_lower in NER_EXACT_BLOCKLIST:
+                    safe_logger.debug(f"Dropping PATIENT_FULL_NAME '{span_text}' — matches exact blocklist label")
+                    continue
+                # Drop spans with embedded colons (field label patterns like 'Name: West Coast')
+                if ":" in span_text:
+                    safe_logger.debug(f"Dropping PATIENT_FULL_NAME '{span_text}' — contains colon (field label)")
+                    continue
+                # Drop if span contains a newline (multi-line false match)
+                if "\n" in span_text or "\\n" in span_text:
+                    safe_logger.debug(f"Dropping PATIENT_FULL_NAME '{span_text}' — contains newline")
+                    continue
+
             # --- Multi-name block — span too large ---
             max_span = _MAX_SPAN_BY_TYPE.get(entity_type, _DEFAULT_MAX_SPAN)
             if (res.end - res.start) > max_span:
@@ -1334,7 +1369,15 @@ class PresidioDeIdentificationService:
                 if re.match(r'^\d+$', span_text.strip()): continue
                 # Reject time patterns in location
                 if re.search(r'\b\d{1,2}\s*(?:AM|PM)\b', span_text, re.IGNORECASE): continue
-                
+
+                # Trim newline-prefix bleeding (e.g. 'Drive\nSan Diego, CA' → trim to 'San Diego, CA')
+                if "\n" in span_text:
+                    last_nl = span_text.rfind("\n")
+                    trimmed = span_text[last_nl + 1:].strip()
+                    if trimmed:
+                        res.start = res.start + last_nl + 1 + (len(span_text[last_nl + 1:]) - len(span_text[last_nl + 1:].lstrip()))
+                        span_text = text[res.start:res.end]
+
                 # Disambiguate State vs. Professional Credential (e.g. 'Jane Doe, MD' vs 'Baltimore, MD')
                 if _CREDENTIALS_TRIM_REGEX.search(span_text):
                     # Check if the text before the comma matches a PERSON entity found by AI
@@ -1398,32 +1441,39 @@ class PresidioDeIdentificationService:
     def _resolve_overlapping_spans(self, results: List[Any]) -> List[Any]:
         """
         Resolves overlapping entity spans using the 'Longest Wins' strategy.
-        1. Sort by span length (descending).
-        2. Keep a span only if it doesn't overlap with an already kept (longer) span.
+        Tiebreak: LOCATION-family (cities, coordinates, MAC) beats PERSON-family to prevent
+        city names like 'San Diego' from being tokenized as persons.
         """
         if not results:
             return []
 
-        # Sort by length DESC, then by score DESC
-        sorted_results = sorted(
-            results, 
-            key=lambda x: (-(x.end - x.start), -x.score)
-        )
+        # Priority: lower = wins the tiebreak
+        TYPE_PRIORITY = {
+            "CITY_FACILITY": 0, "LOCATION": 0, "CITY": 0, "STREET_ADDRESS": 0,
+            "MAC_ADDRESS": 0, "IP_ADDRESS": 0, "COORDINATE": 0, "ZIP_CODE": 0,
+            "EMAIL_ADDRESS": 1, "PHONE_NUMBER": 1, "URL": 1,
+            "ID": 2, "SSN": 2, "MRN": 2,
+            "ORGANIZATION": 3, "HOSPITAL": 3,
+            "PERSON": 4, "PATIENT_FULL_NAME": 5,
+        }
+
+        def sort_key(x):
+            length = x.end - x.start
+            priority = TYPE_PRIORITY.get(x.entity_type, 3)
+            return (-length, priority, -x.score)
+
+        sorted_results = sorted(results, key=sort_key)
 
         final_results = []
         for res in sorted_results:
-            # Check overlap with results already in the final list
             overlaps = False
             for kept in final_results:
-                # Standard overlap check: [s1, e1] and [s2, e2]
                 if not (res.end <= kept.start or res.start >= kept.end):
                     overlaps = True
                     break
-            
             if not overlaps:
                 final_results.append(res)
-        
-        # Re-sort by start position for processing
+
         return sorted(final_results, key=lambda x: x.start)
 
     def _process_single_string(
