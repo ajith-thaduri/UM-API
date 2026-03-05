@@ -199,6 +199,52 @@ Parking: PP-88291
 CVV: 739
 ACT Number: ACT-9928172
         """
+    },
+    {
+        "name": "Case 4: Extreme HIPAA Stress Test (Kevin Alexander Carter)",
+        "patient_name": "Kevin Alexander Carter",
+        "metadata": {
+            "ssn": "612-45-9087",
+            "mrn": "MRN-87456321",
+            "policy": "INS-453829102",
+            "license": "TX-DL-78293451",
+            "phone": "+1 (512) 555-7834",
+            "email": "kevin.carter1981@gmail.com",
+            "emergency_contact": "Laura Carter",
+            "ec_phone": "512-555-9812",
+            "employer": "Carter & Fields Consulting",
+            "employee_id": "EMP-009874",
+            "member_id": "BCBS-88902134",
+            "medicare": "5EG4-TE5-MK73",
+            "prescription": "RX-6637281",
+            "case_id": "CASE-2024-09123",
+            "lab_accession": "LAB-778234",
+            "username": "kevin.carter81",
+            "ip": "192.168.14.72",
+            "device": "DEV-552819",
+            "mac": "00:1A:2B:3C:4D:5E"
+        },
+        "text": """
+Kevin Alexander Carter, a 42-year-old patient, was admitted to Green Valley Medical Center on January 18, 2024, for evaluation of chest pain and dizziness. Kevin was born on July 22, 1981, and currently resides at 4587 Pinecrest Drive, Apartment 12B, Austin, Texas 78704.
+
+Kevin’s Social Security Number is 612-45-9087, and his hospital Medical Record Number (MRN) is MRN-87456321. His insurance policy number is INS-453829102, provided by BlueCross BlueShield. Kevin’s driver’s license number is TX-DL-78293451.
+
+The patient can be contacted via his mobile phone at +1 (512) 555-7834 or through his email kevin.carter1981@gmail.com. His emergency contact is his wife, Laura Carter, reachable at 512-555-9812.
+
+Kevin works as a senior financial analyst at Carter & Fields Consulting located at 1200 Congress Avenue, Suite 450, Austin, TX. His employee ID at the company is EMP-009874.
+
+During the hospital visit, Kevin’s biometric identifiers were recorded, including fingerprint scan ID FP-778219 and facial recognition ID FACE-21984. A retinal scan reference RET-99821 was also stored in the hospital system.
+
+Kevin’s health insurance member ID is BCBS-88902134, and his Medicare number is 5EG4-TE5-MK73. His prescription ID is RX-6637281.
+
+The attending physician, Dr. Michael Thompson, documented the patient’s case and assigned internal case ID CASE-2024-09123.
+
+Kevin previously visited Sunrise Diagnostic Laboratory at 3301 West 5th Street, Austin, TX, where his laboratory accession number LAB-778234 was generated.
+
+Kevin also registered on the hospital portal using the username kevin.carter81 and the IP address 192.168.14.72 during the login session on 01/18/2024 at 09:43 AM.
+
+For telehealth follow-up, Kevin scheduled an online appointment through https://greenvalleymedical.org/patientportal using device ID DEV-552819 and MAC address 00:1A:2B:3C:4D:5E.
+        """
     }
 ]
 
@@ -272,6 +318,15 @@ class ComprehensiveHIPAATest:
                     "00:1A:2B:3C:4D:5E", "00-1A-2B-3C-4D-5E", "192.168.44.212", 
                     "2001:0db8:85a3:0000:0000:8a2e:0370:7334", "DEV-8827391", "BF-928374923",
                     "BIO-22918772", "4T1BF1FK5HU382917", "IL-8721-KD", "PP-88291", "ACT-9928172"
+                ])
+            if "Kevin" in case["patient_name"]:
+                known_phi.extend([
+                    "4587 Pinecrest Drive", "Apartment 12B", "612-45-9087", "MRN-87456321", "INS-453829102",
+                    "TX-DL-78293451", "kevin.carter1981@gmail.com", "Laura Carter", "512-555-9812",
+                    "Carter & Fields Consulting", "1200 Congress Avenue", "Suite 450", "EMP-009874",
+                    "FP-778219", "FACE-21984", "RET-99821", "BCBS-88902134", "5EG4-TE5-MK73",
+                    "RX-6637281", "Dr. Michael Thompson", "CASE-2024-09123", "Sunrise Diagnostic Laboratory",
+                    "3301 West 5th Street", "LAB-778234", "kevin.carter81", "192.168.14.72", "00:1A:2B:3C:4D:5E"
                 ])
 
             # 3. Perform Checks

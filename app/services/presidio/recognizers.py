@@ -271,16 +271,16 @@ EmergencyContactRecognizer = PatternRecognizer(
 
 # Device ID / Account Number / Auth Tokens
 account_patterns = [
-    Pattern("ID Pattern", r"\b[A-Z]{2,4}-\d{6,15}\b", 0.95),
-    Pattern("Dev ID Pattern", r"\bDEV-\d{5,10}\b", 0.95),
-    Pattern("BF Pattern", r"\bBF-\d{6,15}\b", 0.95),
-    Pattern("FaceScan Pattern", r"\bFACESCAN-\d{4}-\d{4}\b", 0.95),
-    Pattern("BioToken Pattern", r"\bBIO-\d{6,12}\b", 0.95),
+    Pattern("ID Pattern", r"\b[A-Z]{2,4}-\d{4,15}\b", 0.95),
+    Pattern("Dev ID Pattern", r"\bDEV-\d{4,10}\b", 0.95),
+    Pattern("BF Pattern", r"\bBF-\d{4,15}\b", 0.95),
+    Pattern("FaceScan Pattern", r"\b(?:FACESCAN|FACE)-\d{4,8}\b", 0.95),
+    Pattern("BioToken Pattern", r"\b(?:BIO|RET|FP)-\d{4,12}\b", 0.95),
 ]
 AccountRecognizer = PatternRecognizer(
     supported_entity="ID",
     patterns=account_patterns,
-    context=["ID", "Account", "Device", "Passport", "License", "Fingerprint", "Scan", "Authentication", "Token"],
+    context=["ID", "Account", "Device", "Passport", "License", "Fingerprint", "Scan", "Authentication", "Token", "Biometric"],
     name="Account_Recognizer"
 )
 
@@ -415,6 +415,19 @@ LabRecognizer = PatternRecognizer(
     name="Lab_Recognizer"
 )
 
+# Medicare / Prescription / Internal Case IDs
+medical_id_patterns = [
+    Pattern("Medicare MBI", r"\b[1-9][A-Z][0-9A-Z][0-9]-[A-Z][0-9A-Z][0-9]-[A-Z]{2}[0-9]{2}\b", 0.99),
+    Pattern("Prescription RX", r"\bRX-\d{4,10}\b", 0.95),
+    Pattern("Internal Case ID", r"\bCASE-\d{4}-\d{5,10}\b", 0.95),
+]
+MedicalIDRecognizer = PatternRecognizer(
+    supported_entity="ID",
+    patterns=medical_id_patterns,
+    context=["Medicare", "MBI", "Prescription", "RX", "Case", "ID"],
+    name="Medical_ID_Recognizer"
+)
+
 # ── Aggregated list of all custom recognizer instances ────────────────────────
 ALL_RECOGNIZERS = [
     MRNRecognizer,
@@ -449,4 +462,5 @@ ALL_RECOGNIZERS = [
     AliasRecognizer,
     ClaimRecognizer,
     LabRecognizer,
+    MedicalIDRecognizer,
 ]
