@@ -488,19 +488,91 @@ async def get_source(
             snippet=entity_source.snippet,
             entity_type=data_type,
         )
+        lab_item = None
+        lab_matching_chunk_ids = []
+        if data_type == "lab":
+            try:
+                extraction_for_lab = extraction_repository.get_by_case_id(db, case_id)
+                labs_for_case = (
+                    (extraction_for_lab.extracted_data or {}).get("labs", [])
+                    if extraction_for_lab and isinstance(extraction_for_lab.extracted_data, dict)
+                    else []
+                )
+                lab_index = int(data_id) if str(data_id).isdigit() else None
+                if lab_index is not None and 0 <= lab_index < len(labs_for_case):
+                    candidate = labs_for_case[lab_index]
+                    if isinstance(candidate, dict):
+                        lab_item = candidate
+                        test_name = str(candidate.get("test_name") or "").strip()
+                        value = str(candidate.get("value") or "").strip()
+                        date = str(candidate.get("date") or "").strip()
+                        raw_matching_chunks = candidate.get("matching_chunks")
+                        if isinstance(raw_matching_chunks, list):
+                            lab_matching_chunk_ids = [
+                                str(cid).strip() for cid in raw_matching_chunks if str(cid).strip()
+                            ]
+
+                        if test_name and value and date:
+                            highlight_term = f"{test_name} {value} {date}"
+                        elif test_name and value:
+                            highlight_term = f"{test_name} {value}"
+                        elif test_name:
+                            highlight_term = test_name
+            except Exception as e:
+                logger.warning(f"Failed to build value-aware lab term: {e}", exc_info=True)
 
         chunk_data = None
         correct_chunk = None
         correct_page = entity_source.page_number
 
-        if entity_source.chunk_id:
-            from app.repositories.chunk_repository import ChunkRepository
+        from app.repositories.chunk_repository import ChunkRepository
+        chunk_repo = ChunkRepository()
 
-            chunk_repo = ChunkRepository()
+        # Prefer matching_chunks from extracted lab item when available.
+        if data_type == "lab" and lab_matching_chunk_ids:
+            try:
+                test_name = str((lab_item or {}).get("test_name") or "").strip().lower()
+                value = str((lab_item or {}).get("value") or "").strip().lower()
+                date = str((lab_item or {}).get("date") or "").strip().lower()
+                best_lab_chunk = None
+                best_score = -1
+                for chunk_id in lab_matching_chunk_ids:
+                    chunk_candidate = chunk_repo.get_by_id(db, chunk_id)
+                    if not chunk_candidate or not chunk_candidate.chunk_text:
+                        continue
+                    text = chunk_candidate.chunk_text.lower()
+                    score = 0
+                    if test_name and test_name in text:
+                        score += 10
+                    if value and value in text:
+                        score += 8
+                    if date and date in text:
+                        score += 6
+                    if chunk_candidate.id == entity_source.chunk_id:
+                        score += 1
+                    if score > best_score:
+                        best_score = score
+                        best_lab_chunk = chunk_candidate
+                # IMPORTANT: For repeated same-name labs, don't trust a candidate
+                # unless it also matches the numeric value when available.
+                value_required = bool(value)
+                best_has_value = bool(best_lab_chunk and value and value in (best_lab_chunk.chunk_text or "").lower())
+                if best_lab_chunk and best_score > 0 and (not value_required or best_has_value):
+                    correct_chunk = best_lab_chunk
+                    correct_page = best_lab_chunk.page_number
+                else:
+                    logger.info(
+                        "[EVIDENCE] matching_chunks did not provide value-specific lab chunk for %s; falling back to full-file search",
+                        entity_id,
+                    )
+            except Exception as e:
+                logger.warning(f"Failed selecting lab chunk from matching_chunks: {e}", exc_info=True)
+
+        if entity_source.chunk_id and not correct_chunk:
             try:
                 chunk = chunk_repo.get_by_id(db, entity_source.chunk_id)
                 if chunk:
-                    entity_name = entity_source.snippet or highlight_term or ""
+                    entity_name = highlight_term if data_type == "lab" else (entity_source.snippet or highlight_term or "")
                     entity_name_clean = entity_name.strip().lower()
                     chunk_text_lower = (chunk.chunk_text or "").lower()
 
@@ -511,12 +583,9 @@ async def get_source(
                 logger.warning(f"Failed to load chunk: {e}", exc_info=True)
 
         if not correct_chunk and entity_source.file_id:
-            from app.repositories.chunk_repository import ChunkRepository
-
-            chunk_repo = ChunkRepository()
             try:
                 all_chunks = chunk_repo.get_by_file_id(db, entity_source.file_id)
-                entity_name = entity_source.snippet or highlight_term or ""
+                entity_name = highlight_term if data_type == "lab" else (entity_source.snippet or highlight_term or "")
                 entity_name_clean = entity_name.strip().lower()
 
                 if entity_name_clean and all_chunks:
@@ -526,18 +595,38 @@ async def get_source(
                         if not chunk.chunk_text:
                             continue
                         chunk_text_lower = chunk.chunk_text.lower()
+
+                        if data_type == "lab" and isinstance(lab_item, dict):
+                            test_name = str(lab_item.get("test_name") or "").strip().lower()
+                            value = str(lab_item.get("value") or "").strip().lower()
+                            date = str(lab_item.get("date") or "").strip().lower()
+                            score = 0
+                            if test_name and test_name in chunk_text_lower:
+                                score += 10
+                            if value and value in chunk_text_lower:
+                                score += 12
+                            if date and date in chunk_text_lower:
+                                score += 8
+                            # Require value hit for repeated-name labs when value exists.
+                            if value and value not in chunk_text_lower:
+                                continue
+                            if score > best_match_score:
+                                best_match_score = score
+                                best_match = chunk
+                            continue
+
                         if entity_name_clean in chunk_text_lower:
                             score = 100 + len(entity_name_clean)
                             if score > best_match_score:
                                 best_match_score = score
                                 best_match = chunk
                                 continue
-                        
+
                         # Fuzzy match
                         import re
                         def normalize_simple(text):
                             return re.sub(r'[^a-zA-Z0-9]', '', text.lower())
-                        
+
                         norm_entity = normalize_simple(entity_name_clean)
                         norm_chunk = normalize_simple(chunk_text_lower)
                         if norm_entity in norm_chunk:
@@ -546,7 +635,7 @@ async def get_source(
                                 best_match_score = score
                                 best_match = chunk
                                 continue
-                        
+
                         # Word overlap
                         words = entity_name_clean.split()
                         if len(words) > 1:
@@ -566,6 +655,39 @@ async def get_source(
                 )
 
         if correct_chunk:
+            if data_type == "lab" and getattr(correct_chunk, "word_segments", None):
+                try:
+                    from app.utils.bbox_utils import find_term_bbox
+                    terms_to_try = []
+                    if isinstance(lab_item, dict):
+                        test_name = str(lab_item.get("test_name") or "").strip()
+                        value = str(lab_item.get("value") or "").strip()
+                        date = str(lab_item.get("date") or "").strip()
+                        unit = str(lab_item.get("unit") or "").strip()
+                        reference_range = str(lab_item.get("reference_range") or "").strip()
+                        if test_name and value and date:
+                            terms_to_try.extend([f"{test_name} {value} {date}", f"{test_name} {date} {value}"])
+                        if test_name and value and unit:
+                            terms_to_try.append(f"{test_name} {value} {unit}")
+                        if test_name and value and reference_range:
+                            terms_to_try.append(f"{test_name} {value} {reference_range}")
+                        if test_name and value:
+                            terms_to_try.append(f"{test_name} {value}")
+                    if not terms_to_try and highlight_term:
+                        terms_to_try.append(highlight_term)
+
+                    seen_terms = set()
+                    for term in terms_to_try:
+                        if not term or term in seen_terms:
+                            continue
+                        seen_terms.add(term)
+                        precise_bbox = find_term_bbox(term, correct_chunk.word_segments)
+                        if precise_bbox:
+                            entity_source.bbox = precise_bbox
+                            break
+                except Exception as e:
+                    logger.warning(f"Failed recalculating lab bbox: {e}", exc_info=True)
+
             chunk_data = {
                 "chunk_id": correct_chunk.id,
                 "chunk_text": correct_chunk.chunk_text,
@@ -1028,6 +1150,7 @@ async def get_entity_source(
         # Extract highlight term using centralized service
         highlight_term = None
         lab_item = None
+        lab_matching_chunk_ids = []
 
         if entity_type == "timeline":
             # For timeline events, get the actual event description from the extraction
@@ -1076,6 +1199,11 @@ async def get_entity_source(
                     candidate = labs[lab_index]
                     if isinstance(candidate, dict):
                         lab_item = candidate
+                        raw_matching_chunks = candidate.get("matching_chunks")
+                        if isinstance(raw_matching_chunks, list):
+                            lab_matching_chunk_ids = [
+                                str(cid).strip() for cid in raw_matching_chunks if str(cid).strip()
+                            ]
                         test_name = str(candidate.get("test_name") or "").strip()
                         value = str(candidate.get("value") or "").strip()
                         date = str(candidate.get("date") or "").strip()
@@ -1110,7 +1238,51 @@ async def get_entity_source(
 
         chunk_repo = ChunkRepository()
 
-        if entity_source.chunk_id:
+        # For labs, prefer chunk candidates from extracted item metadata when available.
+        # This helps recover when persisted EntitySource points to a generic same-name
+        # chunk (e.g., first "WBC"), while matching_chunks include the specific row/day.
+        if entity_type == "lab" and lab_item and lab_matching_chunk_ids:
+            try:
+                test_name = str(lab_item.get("test_name") or "").strip().lower()
+                value = str(lab_item.get("value") or "").strip().lower()
+                date = str(lab_item.get("date") or "").strip().lower()
+                best_lab_chunk = None
+                best_lab_score = -1
+
+                for chunk_id in lab_matching_chunk_ids:
+                    chunk_candidate = chunk_repo.get_by_id(db, chunk_id)
+                    if not chunk_candidate or not chunk_candidate.chunk_text:
+                        continue
+                    text = chunk_candidate.chunk_text.lower()
+                    score = 0
+                    if test_name and test_name in text:
+                        score += 10
+                    if value and value in text:
+                        score += 8
+                    if date and date in text:
+                        score += 6
+                    if chunk_candidate.id == entity_source.chunk_id:
+                        score += 1
+                    if score > best_lab_score:
+                        best_lab_score = score
+                        best_lab_chunk = chunk_candidate
+
+                if best_lab_chunk and best_lab_score > 0:
+                    correct_chunk = best_lab_chunk
+                    correct_page = best_lab_chunk.page_number
+                    logger.info(
+                        "[EVIDENCE] Selected lab chunk from matching_chunks for %s: chunk_id=%s page=%s score=%s",
+                        entity_id,
+                        best_lab_chunk.id,
+                        best_lab_chunk.page_number,
+                        best_lab_score,
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"[EVIDENCE] Failed selecting lab chunk from matching_chunks for {entity_id}: {e}"
+                )
+
+        if entity_source.chunk_id and not correct_chunk:
             logger.info(
                 f"[EVIDENCE] EntitySource has chunk_id={entity_source.chunk_id}, attempting to load chunk data"
             )
@@ -1252,6 +1424,7 @@ async def get_entity_source(
                         unit = str(lab_item.get("unit") or "").strip()
                         reference_range = str(lab_item.get("reference_range") or "").strip()
 
+                        has_value_aware_term = bool(test_name and value)
                         if test_name and value and date:
                             terms_to_try.append(f"{test_name} {value} {date}")
                             terms_to_try.append(f"{test_name} {date} {value}")
@@ -1261,7 +1434,10 @@ async def get_entity_source(
                             terms_to_try.append(f"{test_name} {value} {reference_range}")
                         if test_name and value:
                             terms_to_try.append(f"{test_name} {value}")
-                        if test_name:
+                        # Avoid plain-name fallback for repeated-name labs when a
+                        # value-aware term exists; plain "WBC" reintroduces false
+                        # first-row highlights.
+                        if test_name and not has_value_aware_term:
                             terms_to_try.append(test_name)
                     elif highlight_term:
                         terms_to_try.append(highlight_term)
@@ -1278,9 +1454,10 @@ async def get_entity_source(
                         precise_bbox = find_term_bbox(term, correct_chunk.word_segments)
                         if precise_bbox:
                             entity_source.bbox = precise_bbox
-                            # Keep highlight term aligned with bbox term for better
-                            # frontend text fallback behavior.
-                            highlight_term = term
+                            # Only override term when no term exists. Keep the
+                            # disambiguated value/date-aware term if already set.
+                            if not highlight_term:
+                                highlight_term = term
                             logger.info(
                                 "[EVIDENCE] Using value-aware lab bbox term '%s' for %s",
                                 term[:80],
