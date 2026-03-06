@@ -161,6 +161,11 @@ def analyze_text_advanced(request: AdvancedAnalyzeRequest):
             ("PERSON", r"\b(?:Emergency\s+Contact|Spouse|Relative)[:\s\n]+(?:Name:\s+)?([A-Z][a-z]+(?:[ \t-][A-Z][a-z]+){1,2})\b", 1),
             ("ORGANIZATION", r"\b(?:Employer):\s+([A-Z][A-Za-z.'-]+(?:[ \t]+[A-Z][A-Za-z.'-]+){0,3}[ \t]+(?:Corporation|Corp\.|Inc\.|LLC|Company|Logistics|Power[ \t]+Plant|Bank|Pharmacy|Group))\b", 1),
             ("USERNAME", r"\b(?:Username|User\s*ID|Login|Portal\s*Username):\s+([a-zA-Z0-9._-]+)\b", 1),
+            ("LOCATION", r"\b(?:Country):[ \t]+([A-Z][a-z]+(?:[ \t]+[A-Z][a-z]+){0,2})\b", 1),
+            ("LOCATION", r"\b(?:County):[ \t]+([A-Z][a-z]+(?:[ \t]+[A-Z][a-z]+){0,2}[ \t]+County)\b", 1),
+            ("LOCATION", r"\b(?:State):[ \t]+(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY)\b", 1),
+            ("LOCATION", r"\b(?:State):[ \t]+(Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|Delaware|Florida|Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|Kentucky|Louisiana|Maine|Maryland|Massachusetts|Michigan|Minnesota|Mississippi|Missouri|Montana|Nebraska|Nevada|New[ \t]Hampshire|New[ \t]Jersey|New[ \t]Mexico|New[ \t]York|North[ \t]Carolina|North[ \t]Dakota|Ohio|Oklahoma|Oregon|Pennsylvania|Rhode[ \t]Island|South[ \t]Carolina|South[ \t]Dakota|Tennessee|Texas|Utah|Vermont|Virginia|Washington|West[ \t]Virginia|Wisconsin|Wyoming)\b", 1),
+            ("URL", r"\b(?:URL|Website|Web|Link|Patient\s+Portal)[:\s]+((?:https?://|www[:.]?)[a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+(?:/[a-zA-Z0-9._?=&%-]*)?)\b", 1),
         ]
         
         for entity_type, regex_pattern, group_idx in safe_harbor_heuristics:

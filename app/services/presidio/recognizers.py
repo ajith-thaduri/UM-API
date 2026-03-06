@@ -16,7 +16,7 @@ MRNRecognizer = PatternRecognizer(
 time_patterns = [
     Pattern("12h Time", r"\b\d{1,2}:\d{2}\s?(?:AM|PM|am|pm)\b", 0.95),
     Pattern("24h Time", r"\b(?:[01]\d|2[0-3]):[0-5]\d\b", 0.85),
-    Pattern("Time with context", r"\b(?:at|@)\s*\d{1,2}:\d{2}\b", 0.8),
+    Pattern("Time with context", r"\b(?:at|@)\s*\d{1,2}:\d{2}\b", 0.85),
 ]
 
 TimeRecognizer = PatternRecognizer(
@@ -111,7 +111,9 @@ LocationRecognizer = PatternRecognizer(
 )
 
 state_patterns = [
-    Pattern("State Full", r"\b(?:Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|Delaware|Florida|Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|Kentucky|Louisiana|Maine|Maryland|Massachusetts|Michigan|Minnesota|Mississippi|Missouri|Montana|Nebraska|Nevada|New[ \t]Hampshire|New[ \t]Jersey|New[ \t]Mexico|New[ \t]York|North[ \t]Carolina|North[ \t]Dakota|Ohio|Oklahoma|Oregon|Pennsylvania|Rhode[ \t]Island|South[ \t]Carolina|South[ \t]Dakota|Tennessee|Texas|Utah|Vermont|Virginia|Washington|West[ \t]Virginia|Wisconsin|Wyoming)\b", 0.8)
+    Pattern("State Full Labeled", r"\bState[:\s]+((?:Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|Delaware|Florida|Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|Kentucky|Louisiana|Maine|Maryland|Massachusetts|Michigan|Minnesota|Mississippi|Missouri|Montana|Nebraska|Nevada|New[ \t]Hampshire|New[ \t]Jersey|New[ \t]Mexico|New[ \t]York|North[ \t]Carolina|North[ \t]Dakota|Ohio|Oklahoma|Oregon|Pennsylvania|Rhode[ \t]Island|South[ \t]Carolina|South[ \t]Dakota|Tennessee|Texas|Utah|Vermont|Virginia|Washington|West[ \t]Virginia|Wisconsin|Wyoming))\b", 0.99),
+    Pattern("State Abbr Labeled", r"\bState[:\s]+(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY)\b", 0.99),
+    Pattern("State Full", r"\b(?:Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|Delaware|Florida|Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|Kentucky|Louisiana|Maine|Maryland|Massachusetts|Michigan|Minnesota|Mississippi|Missouri|Montana|Nebraska|Nevada|New[ \t]Hampshire|New[ \t]Jersey|New[ \t]Mexico|New[ \t]York|North[ \t]Carolina|North[ \t]Dakota|Ohio|Oklahoma|Oregon|Pennsylvania|Rhode[ \t]Island|South[ \t]Carolina|South[ \t]Dakota|Tennessee|Texas|Utah|Vermont|Virginia|Washington|West[ \t]Virginia|Wisconsin|Wyoming)\b", 0.8),
 ]
 StateRecognizer = PatternRecognizer(
     supported_entity="LOCATION",
@@ -120,13 +122,40 @@ StateRecognizer = PatternRecognizer(
 )
 
 country_patterns = [
-    Pattern("Country", r"\b(?:USA|U\.S\.|U\.S\.A\.|United States|United Kingdom|UK)\b", 0.8)
+    Pattern("Labeled Country", r"\bCountry[:\s]+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\b", 0.99),
+    Pattern("Country", r"\b(?:USA|U\.S\.|U\.S\.A\.|United States(?:\s+of\s+America)?|United Kingdom|UK|Canada|Mexico|Afghanistan|Albania|Algeria|Andorra|Angola|Antigua and Barbuda|Argentina|Armenia|Australia|Austria|Azerbaijan|Bahamas|Bahrain|Bangladesh|Barbados|Belarus|Belgium|Belize|Benin|Bhutan|Bolivia|Bosnia and Herzegovina|Botswana|Brazil|Brunei|Bulgaria|Burkina Faso|Burundi|Côte d'Ivoire|Cabo Verde|Cambodia|Cameroon|Canada|Central African Republic|Chad|Chile|China|Colombia|Comoros|Congo|Costa Rica|Croatia|Cuba|Cyprus|Czechia|Democratic Republic of the Congo|Denmark|Djibouti|Dominica|Dominican Republic|Ecuador|Egypt|El Salvador|Equatorial Guinea|Eritrea|Estonia|Eswatini|Ethiopia|Fiji|Finland|France|Gabon|Gambia|Georgia|Germany|Ghana|Greece|Grenada|Guatemala|Guinea|Guinea-Bissau|Guyana|Haiti|Holy See|Honduras|Hungary|Iceland|India|Indonesia|Iran|Iraq|Ireland|Israel|Italy|Jamaica|Japan|Jordan|Kazakhstan|Kenya|Kiribati|Kuwait|Kyrgyzstan|Laos|Latvia|Lebanon|Lesotho|Liberia|Libya|Liechtenstein|Lithuania|Luxembourg|Madagascar|Malawi|Malaysia|Maldives|Mali|Malta|Marshall Islands|Mauritania|Mauritius|Mexico|Micronesia|Moldova|Monaco|Mongolia|Montenegro|Morocco|Mozambique|Myanmar|Namibia|Nauru|Nepal|Netherlands|New Zealand|Nicaragua|Niger|Nigeria|North Korea|North Macedonia|Norway|Oman|Pakistan|Palau|Palestine State|Panama|Papua New Guinea|Paraguay|Peru|Philippines|Poland|Portugal|Qatar|Romania|Russia|Rwanda|Saint Kitts and Nevis|Saint Lucia|Saint Vincent and the Grenadines|Samoa|San Marino|Sao Tome and Principe|Saudi Arabia|Senegal|Serbia|Seychelles|Sierra Leone|Singapore|Slovakia|Slovenia|Solomon Islands|Somalia|South Africa|South Korea|South Sudan|Spain|Sri Lanka|Sudan|Suriname|Sweden|Switzerland|Syria|Tajikistan|Tanzania|Thailand|Timor-Leste|Togo|Tonga|Trinidad and Tobago|Tunisia|Turkey|Turkmenistan|Tuvalu|Uganda|Ukraine|United Arab Emirates|United Kingdom|United States of America|Uruguay|Uzbekistan|Vanuatu|Venezuela|Vietnam|Yemen|Zambia|Zimbabwe)\b", 0.85),
 ]
 CountryRecognizer = PatternRecognizer(
     supported_entity="LOCATION",
     patterns=country_patterns,
     name="Country_Recognizer"
 )
+
+# County Detection
+county_patterns = [
+    Pattern("County Labeled", r"\bCounty[:\s]+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2}\s+County)\b", 0.99),
+    Pattern("County Name", r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\s+County\b", 0.95),
+]
+CountyRecognizer = PatternRecognizer(
+    supported_entity="LOCATION",
+    patterns=county_patterns,
+    context=["county", "region", "district"],
+    name="County_Recognizer"
+)
+
+# URL Detection
+url_patterns = [
+    Pattern("Labeled URL", r"\b(?:URL|Website|Web|Link|Patient\s+Portal)[:\s]+((?:https?://|www[:.]?)[a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+(?:/[a-zA-Z0-9._?=&%-]*)?)\b", 0.99),
+    Pattern("Labeled Naked Domain", r"\b(?:URL|Website|Web|Link|Patient\s+Portal)[:\s]+([a-zA-Z0-9-]+\.(?:com|org|net|edu|gov|io|co|us|me)(?:/[a-zA-Z0-9._?=&%-]*)?)\b", 0.99),
+    Pattern("Standard Protocol URL", r"\b(?:https?://|www[:.]?)[a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+(?:/[a-zA-Z0-9._?=&%-]*)?\b", 0.95),
+]
+UrlRecognizer = PatternRecognizer(
+    supported_entity="URL",
+    patterns=url_patterns,
+    context=["http", "https", "www", "url", "portal", "website", "link"],
+    name="URL_Recognizer"
+)
+
 
 # MAC Address Detection
 mac_patterns = [
@@ -471,4 +500,6 @@ ALL_RECOGNIZERS = [
     ClaimRecognizer,
     LabRecognizer,
     MedicalIDRecognizer,
+    CountyRecognizer,
+    UrlRecognizer,
 ]
