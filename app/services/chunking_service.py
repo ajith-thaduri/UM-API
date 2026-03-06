@@ -9,6 +9,7 @@ import logging
 
 from app.core.config import settings
 from app.models.document_chunk import SectionType
+from app.utils.bbox_utils import assign_words_to_chunk
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,9 @@ class ChunkData:
     vector_id: str
     file_id: str
     bbox: Optional[Dict[str, float]] = None  # Bounding box: {"x0": float, "y0": float, "x1": float, "y1": float}
+    # Word-level segments for term-precise highlighting at query time.
+    # Each entry: {"text": str, "bbox": {"x0", "y0", "x1", "y1"}}
+    word_segments: Optional[List[Dict[str, Any]]] = None
 
 
 class ChunkingService:
@@ -324,28 +328,32 @@ class ChunkingService:
                     char_to_bbox[char_pos + i] = bbox
                 char_pos += len(segment_text) + 1  # +1 for space
         
-        # Assign bbox to each chunk
+        # Assign bbox and word_segments to each chunk
         for chunk in chunks:
-            # Find bbox for the chunk by looking at char positions
+            # ── 1. Union bbox (coarse, for fallback) ──────────────────────────
             chunk_bboxes = []
             for char_pos in range(chunk.char_start, min(chunk.char_end, len(char_to_bbox) + chunk.char_start)):
                 if char_pos in char_to_bbox:
                     chunk_bboxes.append(char_to_bbox[char_pos])
-            
+
             if chunk_bboxes:
-                # Calculate union bbox (min x0/y0, max x1/y1)
-                x0 = min(bbox.get("x0", 0) for bbox in chunk_bboxes)
-                y0 = min(bbox.get("y0", 0) for bbox in chunk_bboxes)
-                x1 = max(bbox.get("x1", 0) for bbox in chunk_bboxes)
-                y1 = max(bbox.get("y1", 0) for bbox in chunk_bboxes)
+                x0 = min(b.get("x0", 0) for b in chunk_bboxes)
+                y0 = min(b.get("y0", 0) for b in chunk_bboxes)
+                x1 = max(b.get("x1", 0) for b in chunk_bboxes)
+                y1 = max(b.get("y1", 0) for b in chunk_bboxes)
                 chunk.bbox = {"x0": x0, "y0": y0, "x1": x1, "y1": y1}
-            else:
-                # Fallback: use first segment's bbox if available
-                if text_segments:
-                    first_bbox = text_segments[0].get("bbox")
-                    if first_bbox:
-                        chunk.bbox = first_bbox
-        
+            elif text_segments:
+                first_bbox = text_segments[0].get("bbox")
+                if first_bbox:
+                    chunk.bbox = first_bbox
+
+            # ── 2. Word-level segments (precise term lookup at query time) ────
+            # Greedily match each page word into this chunk's text so we store
+            # only the words that actually belong to this chunk.
+            chunk.word_segments = assign_words_to_chunk(
+                chunk.chunk_text, text_segments
+            )
+
         return chunks
 
 

@@ -76,6 +76,26 @@ class PresidioDeIdentificationService:
         self._variant_token_map: Dict[str, str] = {}
         self._strip_list: List[str] = []
 
+    @staticmethod
+    def _apply_deterministic_regex(text: str) -> str:
+        """Apply strict regex for explicitly labeled fields that NER struggles with."""
+        import re
+        
+        # 1. Patient Name / Alias
+        text = re.sub(r"\b(Patient(?:\s+Name)?|Name|PT):\s+([A-Z][a-z]+(?:[\s-][A-Z][a-z]+){1,3})\b", r"\1: [[PERSON-01]]", text, flags=re.IGNORECASE)
+        text = re.sub(r"\b(Alias|AKA|Also known as|Goes by):\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})\b", r"\1: [[PERSON-01]]", text, flags=re.IGNORECASE)
+        
+        # 2. Relatives
+        text = re.sub(r"\b(Emergency\s+Contact|Spouse|Relative)[:\s\n]+(?:Name:\s+)?[A-Z][a-z]+(?:[\s-][A-Z][a-z]+){1,2}\b", r"\1: [[REDACTED]]", text, flags=re.IGNORECASE)
+        
+        # 3. Employer
+        text = re.sub(r"\b(Employer)[:\s]+(?:[A-Z][A-Za-z.'-]+(?:[ \t]+[A-Z][A-Za-z.'-]+){0,3})[ \t]+(?:Corporation|Corp\.|Inc\.|LLC|Company|Logistics|Power[ \t]+Plant|Bank|Pharmacy|Group)\b", r"\1: [[ORGANIZATION-01]]", text, flags=re.IGNORECASE)
+        
+        # 4. Username
+        text = re.sub(r"\b(Username|User\s*ID|Login|Portal\s*Username)[:\s]+[a-zA-Z0-9._-]+\b", r"\1: [[REDACTED]]", text, flags=re.IGNORECASE)
+        
+        return text
+
     # ── Admin / engine API ────────────────────────────────────────────────────
 
     def switch_ner_engine(self, engine_type: str = None, model_id: str = None) -> Dict[str, Any]:
@@ -174,19 +194,34 @@ class PresidioDeIdentificationService:
         if document_chunks:
             safe_logger.info(f"De-identifying {len(document_chunks)} chunks for case {case_id}")
             for chunk in document_chunks:
+                # 1. Deterministic replacement first
                 de_id_chunk = replace_in_string(chunk, self._variant_token_map, self._strip_list)
+
+                # 1.5. Deterministic Regex for tough HIPAA cases
+                de_id_chunk = self._apply_deterministic_regex(de_id_chunk)
+
+                # 2. Global date shift for standard formats
+                #    We do this BEFORE NER so that process_residual_phi_in_string can skip shifted dates
                 de_id_chunk = shift_dates_in_text(de_id_chunk, shift_days)
+
                 if analyzer:
+                    # 3. NER Scan (Standard dates are already shifted, residual ones like "last March" remain)
                     analyzed = analyzer.analyze(
                         text=de_id_chunk, language="en", score_threshold=score_threshold
                     )
+                    # 4. Filter out entities that overlap with existing tokens [[...]]
+                    token_markers = [(m.start(), m.end()) for m in re.finditer(r"\[\[.*?\]\]", de_id_chunk)]
+                    from .span_processor import _overlaps_any_token
                     analyzed = [
-                        r for r in analyzed if "[[" not in de_id_chunk[r.start:r.end]
+                        r for r in analyzed if not _overlaps_any_token(r.start, r.end, token_markers)
                     ]
+                    
                     if analyzed:
+                        # 5. Process residual PHI (includes skip logic for already shifted dates)
                         de_id_chunk = process_residual_phi_in_string(
                             de_id_chunk, analyzed, token_map, shift_days, score_threshold
                         )
+                
                 de_id_chunks.append(de_id_chunk)
             safe_logger.info(f"De-identified {len(de_id_chunks)} chunks")
 

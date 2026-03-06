@@ -135,6 +135,7 @@ class CaseProcessor:
                 token_count=chunk_data.token_count,
                 vector_id=chunk_data.vector_id,
                 bbox=chunk_data.bbox,
+                word_segments=chunk_data.word_segments,
                 created_at=datetime.utcnow(),
                 embedding=embeddings[i]  # STORE VECTOR DIRECTLY
             )

@@ -1191,11 +1191,25 @@ async def get_entity_source(
                     else str(correct_chunk.section_type)
                 ),
             }
-            # Use chunk bbox if EntitySource bbox is missing
-            if not entity_source.bbox and correct_chunk.bbox:
-                logger.debug(
-                    f"[EVIDENCE] Using bbox from chunk (EntitySource bbox was missing)"
-                )
+
+            # ── Precise term bbox ──────────────────────────────────────────────
+            # Try to narrow the highlight from the coarse chunk-union bbox down
+            # to just the words that make up the extracted term.
+            from app.utils.bbox_utils import find_term_bbox as _find_term_bbox
+
+            word_segs = getattr(correct_chunk, "word_segments", None)
+            if word_segs and highlight_term:
+                precise_bbox = _find_term_bbox(highlight_term, word_segs)
+                if precise_bbox:
+                    logger.debug(
+                        "[EVIDENCE] Precise term bbox computed for '%s': %s",
+                        highlight_term, precise_bbox,
+                    )
+                    entity_source.bbox = precise_bbox
+                elif not entity_source.bbox and correct_chunk.bbox:
+                    entity_source.bbox = correct_chunk.bbox
+            elif not entity_source.bbox and correct_chunk.bbox:
+                logger.debug("[EVIDENCE] Using bbox from chunk (EntitySource bbox was missing)")
                 entity_source.bbox = correct_chunk.bbox
 
         if not chunk_data:

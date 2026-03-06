@@ -86,6 +86,10 @@ def process_residual_phi_in_string(
 
         # TIER C: DATE — safety-shift residual dates
         if entity_type == "DATE_TIME":
+            # If it's already in MM/DD/YYYY format, it's likely already shifted by a previous pass
+            # (e.g. the global shift_dates_in_text called before this). Skip to avoid double-shifting.
+            if re.match(r"^\d{1,2}/\d{1,2}/\d{4}$", entity_text):
+                continue
             shifted = _shift_dates_in_text(entity_text, shift_days)
             new_text = new_text[:res.start] + shifted + new_text[res.end:]
             continue

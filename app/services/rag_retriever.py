@@ -48,6 +48,9 @@ class RetrievedChunk:
     char_end: int
     token_count: int
     bbox: Optional[List[Dict]] = None
+    # Word-level segments for precise term bbox lookup at source-link time.
+    # Format: [{"text": str, "bbox": {"x0", "y0", "x1", "y1"}}, ...]
+    word_segments: Optional[List[Dict]] = None
 
 
 @dataclass
@@ -177,7 +180,8 @@ class RAGRetriever:
                 char_start=chunk.char_start,
                 char_end=chunk.char_end,
                 token_count=chunk.token_count,
-                bbox=chunk.bbox
+                bbox=chunk.bbox,
+                word_segments=chunk.word_segments,
             ))
         
         # Apply reranking if enabled
@@ -279,7 +283,8 @@ class RAGRetriever:
                     char_start=chunk.char_start,
                     char_end=chunk.char_end,
                     token_count=chunk.token_count,
-                    bbox=chunk.bbox
+                    bbox=chunk.bbox,
+                    word_segments=chunk.word_segments,
                 )
                 for chunk in db_chunks
             ]
@@ -314,7 +319,8 @@ class RAGRetriever:
                 char_start=chunk.char_start,
                 char_end=chunk.char_end,
                 token_count=chunk.token_count,
-                bbox=chunk.bbox
+                bbox=chunk.bbox,
+                word_segments=chunk.word_segments,
             )
             for chunk in db_chunks
         ]
@@ -568,7 +574,9 @@ class RAGRetriever:
             score=1.0,
             char_start=chunk.char_start,
             char_end=chunk.char_end,
-            token_count=chunk.token_count
+            token_count=chunk.token_count,
+            bbox=chunk.bbox,
+            word_segments=chunk.word_segments,
         )
 
     def get_chunk_by_vector_id(
@@ -602,7 +610,9 @@ class RAGRetriever:
             score=1.0,
             char_start=chunk.char_start,
             char_end=chunk.char_end,
-            token_count=chunk.token_count
+            token_count=chunk.token_count,
+            bbox=chunk.bbox,
+            word_segments=chunk.word_segments,
         )
 
 

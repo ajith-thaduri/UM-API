@@ -30,15 +30,17 @@ ALL_ENTITY_TYPES = [
     "PASSPORT", "DRIVERS_LICENSE", "US_DRIVER_LICENSE", "US_PASSPORT",
     "MRN", "TIME", "HOSPITAL", "PROVIDER", "PATIENT_FULL_NAME", "CITY", "CITY_FACILITY", "AGE", "ID",
     "STREET_ADDRESS", "ZIP_CODE", "NPI", "INSURANCE_ID", "ACCOUNT_NUMBER", "PII", "COORDINATE",
+    "MAC_ADDRESS", "SUB_ADDRESS", "USERNAME"
 ]
 
-# Default entities for medical context (The 18 Safe Harbor Identifiers)
+# Default entities for medical context (The 18 Safe Harbor Identifiers + Custom)
 DEFAULT_MEDICAL_ENTITIES = [
-    "PERSON", "DATE_TIME", "AGE", "PHONE_NUMBER", "SSN", "US_SSN", "EMAIL_ADDRESS",
+    "PERSON", "DATE_TIME", "AGE", "TIME", "PHONE_NUMBER", "SSN", "US_SSN", "EMAIL_ADDRESS",
     "LOCATION", "CITY", "CITY_FACILITY", "STREET_ADDRESS", "ZIP_CODE",
     "ORGANIZATION", "HOSPITAL", "PROVIDER", 
     "IP_ADDRESS", "URL", "VEHICLE_PLATE", "PASSPORT", "DRIVERS_LICENSE", 
     "MRN", "NPI", "INSURANCE_ID", "ID", "ACCOUNT_NUMBER", "COORDINATE",
+    "PATIENT_FULL_NAME", "MAC_ADDRESS", "SUB_ADDRESS", "USERNAME"
 ]
 
 
@@ -145,24 +147,35 @@ def analyze_text_advanced(request: AdvancedAnalyzeRequest):
 
         # 2b. High-confidence Safe Harbor Heuristics
         safe_harbor_heuristics = [
-            ("SSN", r"\b\d{3}-\d{2}-\d{4}\b"),
-            ("IP_ADDRESS", r"\b(?:\d{1,3}\.){3}\d{1,3}\b"),
-            ("VEHICLE_PLATE", r"\b[A-Z]{2}-[A-Z]{2,4}-\d{4}\b"),
-            ("PASSPORT", r"\b[A-Z]\d{8,9}\b"),
-            ("DRIVERS_LICENSE", r"\b[A-Z]\d{6,8}\b"),
+            ("SSN", r"\b\d{3}-\d{2}-\d{4}\b", 0),
+            ("IP_ADDRESS", r"\b(?:\d{1,3}\.){3}\d{1,3}\b", 0),
+            ("VEHICLE_PLATE", r"\b[A-Z]{2}-[A-Z]{2,4}-\d{4}\b", 0),
+            ("PASSPORT", r"\b[A-Z]\d{8,9}\b", 0),
+            ("DRIVERS_LICENSE", r"\b[A-Z]\d{6,8}\b", 0),
+            ("MAC_ADDRESS", r"\b(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b", 0),
+            ("SUB_ADDRESS", r"\b(?:Ap(?:art)?(?:ment|t)\.?|S(?:ui)?te\.?|Unit|Room\.?|Floor\.?|PO Box)\s*#?\s*[A-Za-z0-9-]{1,6}\b", 0),
+            ("TIME", r"\b\d{1,2}:\d{2}\s?(?:AM|PM|am|pm)\b", 0),
+            # Explicit labeled fields from the production deterministic pass
+            ("PERSON", r"\b(?:Patient(?:\s+Name)?|Name|PT):\s+([A-Z][a-z]+(?:[ \t-][A-Z][a-z]+){1,3})\b", 1),
+            ("PERSON", r"\b(?:Alias|AKA|Also known as|Goes by):\s+([A-Z][a-z]+(?:[ \t]+[A-Z][a-z]+){0,3})\b", 1),
+            ("PERSON", r"\b(?:Emergency\s+Contact|Spouse|Relative)[:\s\n]+(?:Name:\s+)?([A-Z][a-z]+(?:[ \t-][A-Z][a-z]+){1,2})\b", 1),
+            ("ORGANIZATION", r"\b(?:Employer):\s+([A-Z][A-Za-z.'-]+(?:[ \t]+[A-Z][A-Za-z.'-]+){0,3}[ \t]+(?:Corporation|Corp\.|Inc\.|LLC|Company|Logistics|Power[ \t]+Plant|Bank|Pharmacy|Group))\b", 1),
+            ("USERNAME", r"\b(?:Username|User\s*ID|Login|Portal\s*Username):\s+([a-zA-Z0-9._-]+)\b", 1),
         ]
         
-        for entity_type, regex_pattern in safe_harbor_heuristics:
+        for entity_type, regex_pattern, group_idx in safe_harbor_heuristics:
             pattern = re.compile(regex_pattern, re.IGNORECASE)
             for match in pattern.finditer(text):
-                # Check for overlap with existing high-quality results
-                if not any(not (r.end <= match.start() or r.start >= match.end()) for r in results):
-                    denylist_results.append({
-                        "entity_type": entity_type,
-                        "text": text[match.start():match.end()],
-                        "start": match.start(), "end": match.end(), "score": 1.0,
-                        "explanation": f"Deterministic Safe Harbor: {entity_type}",
-                    })
+                start = match.start(group_idx) if group_idx else match.start()
+                end = match.end(group_idx) if group_idx else match.end()
+                
+                # Append directly; overlaps will be resolved in Step 3 prioritizing our 1.5 score
+                denylist_results.append({
+                    "entity_type": entity_type,
+                    "text": text[start:end],
+                    "start": start, "end": end, "score": 1.5,
+                    "explanation": f"Deterministic Safe Harbor: {entity_type}",
+                })
 
         # ── Step 3: Canonicalize and Format ──
         from app.services.presidio_deidentification_service import normalize_entity_type
@@ -183,13 +196,14 @@ def analyze_text_advanced(request: AdvancedAnalyzeRequest):
             final_results.append(dr)
 
         # Resolve any new overlaps introduced by heuristics
-        # Prioritize longer spans in case of overlap
-        final_results.sort(key=lambda x: (x["end"] - x["start"]), reverse=True)
+        # Prioritize by 1) Explicit deterministic heuristic (score > 1.0) 2) Length of match
+        final_results.sort(key=lambda x: (1 if x["score"] > 1.0 else 0, x["end"] - x["start"]), reverse=True)
         final_results_clean = []
         for res in final_results:
-            # Check if this result overlaps with any already-accepted result
-            # If it does, and the accepted result is longer or equal, skip this one.
-            # If this one is longer, it will be added and potentially cover smaller ones later.
+            # Revert score if it was spoofed high for sorting
+            if res["score"] > 1.0:
+                res["score"] = 1.0
+                
             is_covered = False
             for accepted_res in final_results_clean:
                 # Check for overlap: (start1 < end2 and end1 > start2)
@@ -198,6 +212,7 @@ def analyze_text_advanced(request: AdvancedAnalyzeRequest):
                     break
             if not is_covered:
                 final_results_clean.append(res)
+
         
         final_results = sorted(final_results_clean, key=lambda x: x["start"])
         

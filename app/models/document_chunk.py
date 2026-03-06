@@ -60,6 +60,12 @@ class DocumentChunk(Base):
     # Format: {"x0": float, "y0": float, "x1": float, "y1": float}
     # Coordinates are in PDF points (1/72 inch)
     bbox = Column(JSON, nullable=True)  # Optional for backward compatibility
+
+    # Word-level segments for term-precise highlighting.
+    # Format: [{"text": str, "bbox": {"x0", "y0", "x1", "y1"}}, ...]
+    # Populated by chunk_page_with_bbox; allows find_term_bbox() to locate any
+    # extracted term within this chunk at render time without re-reading the PDF.
+    word_segments = Column(JSON, nullable=True)
     
     # Vector database reference (FAISS)
     vector_id = Column(String, unique=True, nullable=False, index=True)

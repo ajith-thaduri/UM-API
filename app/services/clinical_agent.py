@@ -15,6 +15,7 @@ from app.services.rag_retriever import rag_retriever, RAGContext
 from app.services.embedding_service import embedding_service
 from app.db.session import SessionLocal
 from app.services.prompt_service import prompt_service
+from app.utils.bbox_utils import find_term_bbox
 
 logger = logging.getLogger(__name__)
 
@@ -429,19 +430,32 @@ Admission information, chief complaint, and hospital course.
                 items = all_data.get(data_key, [])
                 for item in items:
                     search_term = str(item.get("name") or item.get("test_name") or item.get("allergen") or item.get("study_type") or item.get("type", ""))
-                    if not search_term or len(search_term) < 2: continue
-                        
+                    if not search_term or len(search_term) < 2:
+                        continue
+
                     for chunk in context.chunks:
                         if search_term.lower() in chunk.chunk_text.lower():
+                            # Compute tight term bbox; fall back to coarse chunk union bbox
+                            precise_bbox = (
+                                find_term_bbox(search_term, chunk.word_segments)
+                                if chunk.word_segments
+                                else None
+                            ) or (chunk.bbox if hasattr(chunk, "bbox") else None)
+
                             item.update({
                                 "source_file_id": chunk.file_id,
                                 "source_page": chunk.page_number,
-                                "bbox": chunk.bbox if hasattr(chunk, "bbox") else None
+                                "bbox": precise_bbox,
                             })
                             all_sources.append({
-                                "type": source_type, "chunk_id": chunk.chunk_id, "vector_id": chunk.vector_id,
-                                "file_id": chunk.file_id, "page_number": chunk.page_number,
-                                "section_type": chunk.section_type.value, "score": chunk.score
+                                "type": source_type,
+                                "chunk_id": chunk.chunk_id,
+                                "vector_id": chunk.vector_id,
+                                "file_id": chunk.file_id,
+                                "page_number": chunk.page_number,
+                                "section_type": chunk.section_type.value,
+                                "score": chunk.score,
+                                "bbox": precise_bbox,
                             })
                             break
             all_chunks.extend([c.chunk_id for c in context.chunks])

@@ -161,6 +161,7 @@ class ChunkRepository(BaseRepository[DocumentChunk]):
                 "char_end": chunk.char_end,
                 "token_count": chunk.token_count,
                 "bbox": chunk.bbox,
+                "word_segments": chunk.word_segments,
                 "created_at": chunk.created_at,
                 "embedding": chunk.embedding
             }

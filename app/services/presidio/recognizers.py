@@ -46,12 +46,14 @@ HospitalRecognizer = PatternRecognizer(
 
 # Employers / Organizations
 employer_patterns = [
-    Pattern("Corporate Org", r"\b(?:[A-Z][A-Za-z.'-]+(?:[ \t]+[A-Z][A-Za-z.'-]+){0,3})[ \t]+(?:Corporation|Corp\.|Inc\.|LLC|Company|Logistics|Power[ \t]+Plant|Bank|Pharmacy)\b", 0.95),
+    Pattern("Labeled Employer", r"\bEmployer[:\s]+([A-Z][a-z]+(?:\s+[A-Z][A-Za-z]+){0,3})\b", 0.95),
+    Pattern("Corporate Org", r"\b(?:[A-Z][A-Za-z.'-]+(?:[ \t]+[A-Z][A-Za-z.'-]+){0,3})[ \t]+(?:Corporation|Corp\.|Inc\.|LLC|Company|Logistics|Power[ \t]+Plant|Bank|Pharmacy|Group)\b", 0.95),
     Pattern("BlueCross", r"\bBlue[ \t]?Cross[ \t]?(?:Blue[ \t]?Shield)?(?:[ \t]+of[ \t]+[A-Z][A-Za-z]+)?\b", 0.95)
 ]
 EmployerRecognizer = PatternRecognizer(
     supported_entity="ORGANIZATION",
     patterns=employer_patterns,
+    context=["Employer", "Company"],
     global_regex_flags=re.IGNORECASE | re.MULTILINE,
     name="Employer_Recognizer"
 )
@@ -71,7 +73,9 @@ DoctorRecognizer = PatternRecognizer(
 
 # HIPAA Category #1: Full Patient Names
 name_patterns = [
-    Pattern("Labeled Patient Name", r"\b(?:Patient|Name|PT)[:\s]+([A-Z][a-z]+)\s+([A-Z][a-z]+)\b", 0.95),
+    Pattern("Labeled Patient Name", r"\b(?:Patient(?:\s+Name)?|Name|PT)[:\s]+([A-Z][a-z]+(?:[\s-][A-Z][a-z]+){1,3})\b", 0.95),
+    Pattern("Alias Label", r"\b(?:Alias|AKA|Also known as|Goes by)[:\s]+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})\b", 0.95),
+    Pattern("Emergency Contact", r"\b(?:Emergency\s+Contact|Spouse|Relative)[:\s\n]+(?:Name[:\s]+)?([A-Z][a-z]+(?:[\s-][A-Z][a-z]+){1,2})\b", 0.95),
     Pattern("Name with Salutation", r"\b(?:Mr\.|Ms\.|Mrs\.|Miss)\s+([A-Z][a-z]+)\s+([A-Z][a-z]+)\b", 0.95),
     Pattern("Contextual Full Name", r"\b([A-Z][a-z]+)\s([A-Z][a-z]+)\b", 0.85) 
 ]
@@ -79,8 +83,8 @@ name_patterns = [
 FullNameRecognizer = PatternRecognizer(
     supported_entity="PATIENT_FULL_NAME",
     patterns=name_patterns,
-    context=["Patient", "Name", "Mr.", "Mrs.", "Miss", "Ms."],
-    global_regex_flags=re.MULTILINE | re.DOTALL,
+    context=["Patient", "Name", "Mr.", "Mrs.", "Miss", "Ms.", "Alias", "Contact", "Spouse", "Dan", "Mitchell"],
+    global_regex_flags=re.MULTILINE,
     name="FullName_Recognizer"
 )
 
@@ -89,8 +93,10 @@ VALID_STATES = r"AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|MA|MD|ME|
 
 location_patterns = [
     # City, State pairs (same line — with comma separation)
-    Pattern("City StateAbbr", rf"\b[A-Z][a-z]+(?:\s[A-Z][a-z]+){{0,2}},\s*(?:{VALID_STATES})\b", 0.99),
-    Pattern("City StateFull", r"\b[A-Z][a-z]+(?:\s[A-Z][a-z]+){{0,2}},\s*(?:Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|Delaware|Florida|Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|Kentucky|Louisiana|Maine|Maryland|Massachusetts|Michigan|Minnesota|Mississippi|Missouri|Montana|Nebraska|Nevada|New[ \t]Hampshire|New[ \t]Jersey|New[ \t]Mexico|New[ \t]York|North[ \t]Carolina|North[ \t]Dakota|Ohio|Oklahoma|Oregon|Pennsylvania|Rhode[ \t]Island|South[ \t]Carolina|South[ \t]Dakota|Tennessee|Texas|Utah|Vermont|Virginia|Washington|West[ \t]Virginia|Wisconsin|Wyoming)\b", 0.99),
+    Pattern("City StateAbbr", rf"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){{0,2}},\s*(?:{VALID_STATES})\b", 0.99),
+    Pattern("City StateFull", r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){{0,2}},\s*(?:Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|Delaware|Florida|Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|Kentucky|Louisiana|Maine|Maryland|Massachusetts|Michigan|Minnesota|Mississippi|Missouri|Montana|Nebraska|Nevada|New[ \t]Hampshire|New[ \t]Jersey|New[ \t]Mexico|New[ \t]York|North[ \t]Carolina|North[ \t]Dakota|Ohio|Oklahoma|Oregon|Pennsylvania|Rhode[ \t]Island|South[ \t]Carolina|South[ \t]Dakota|Tennessee|Texas|Utah|Vermont|Virginia|Washington|West[ \t]Virginia|Wisconsin|Wyoming)\b", 0.99),
+    # Lone states (Standalone State Words)
+    Pattern("State Full", r"\b(?:Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|Delaware|Florida|Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|Kentucky|Louisiana|Maine|Maryland|Massachusetts|Michigan|Minnesota|Mississippi|Missouri|Montana|Nebraska|Nevada|New[ \t]Hampshire|New[ \t]Jersey|New[ \t]Mexico|New[ \t]York|North[ \t]Carolina|North[ \t]Dakota|Ohio|Oklahoma|Oregon|Pennsylvania|Rhode[ \t]Island|South[ \t]Carolina|South[ \t]Dakota|Tennessee|Texas|Utah|Vermont|Virginia|Washington|West[ \t]Virginia|Wisconsin|Wyoming)\b", 0.90),
     # Lone Cities — extended with more common US cities
     Pattern("Major Cities", r"\b(?:Washington|Buffalo|Chicago|Austin|Seattle|Boston|Atlanta|Dallas|Denver|Houston|Miami|Phoenix|Philadelphia|Detroit|Minneapolis|Pittsburgh|San Diego|San Francisco|San Jose|San Antonio|Los Angeles|New York|Las Vegas|Portland|Sacramento|Springfield|Jacksonville|Memphis|Nashville|Louisville|Baltimore|Milwaukee|Albuquerque|Tucson|Fresno|Mesa|Omaha|Raleigh|Cleveland|Arlington|Tampa|New Orleans|Bakersfield|Honolulu|Anaheim|Aurora|Santa Ana|Corpus Christi|Riverside|Lexington|Stockton|Henderson|Saint Paul|Cincinnati|Greensboro|Pittsburgh|St\. Louis|Lincoln|Orlando|Irvine|Durham|Madison|Fort Worth|El Paso|Columbus|Charlotte|Indianapolis)\b", 0.90),
     # Locations like 'Shelter', 'Clinic'
@@ -135,11 +141,11 @@ MACAddressRecognizer = PatternRecognizer(
 
 # Sub-Address Detection (Apartment, Suite, Room, Unit)
 sub_address_patterns = [
-    Pattern("Apartment", r"\bAp(?:art)?(?:ment|t)\.?\s*#?\s*\w{1,6}\b", 0.99),
-    Pattern("Suite", r"\bS(?:ui)?te\.?\s*#?\s*\w{1,6}\b", 0.99),
+    Pattern("Apartment", r"\bAp(?:art)?(?:ment|t)\.?\s*#?\s*[A-Za-z0-9]{1,6}\b", 0.99),
+    Pattern("Suite", r"\bS(?:ui)?te\.?\s*#?\s*[A-Za-z0-9]{1,6}\b", 0.99),
     Pattern("Room Number", r"\bR(?:oo)?m\.?\s*#?\s*\d{1,4}[A-Za-z]?\b", 0.85),
     Pattern("Floor", r"\bFl(?:oor)?\.?\s*#?\s*\d{1,3}[A-Za-z]?\b", 0.85),
-    Pattern("Unit", r"\bUnit\s*#?\s*\w{1,6}\b", 0.95),
+    Pattern("Unit", r"\bUnit\s*#?\s*[A-Za-z0-9]{1,6}\b", 0.95),
     Pattern("PO Box", r"\bP\.?\s*O\.?\s*Box\s+\d{1,6}\b", 0.99),
 ]
 SubAddressRecognizer = PatternRecognizer(
@@ -359,12 +365,14 @@ CVVRecognizer = PatternRecognizer(
 )
 # Usernames
 username_patterns = [
-    Pattern("Username", r"\b[a-z][a-z0-9._-]*[0-9._-]+[a-z0-9._-]*\b", 0.95)
+    Pattern("Labeled Username", r"\b(?:Username|User\s*ID|Login|Portal\s*Username)[:\s]+([a-zA-Z0-9._-]+)\b", 0.99),
+    Pattern("Username", r"\b[a-z][a-z0-9._-]*[0-9._-]+[a-z0-9._-]*\b", 0.80)
 ]
 UsernameRecognizer = PatternRecognizer(
     supported_entity="USERNAME",
     patterns=username_patterns,
     context=["user", "username", "login", "portal"],
+    global_regex_flags=re.IGNORECASE,
     name="Username_Recognizer"
 )
 

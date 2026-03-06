@@ -269,11 +269,14 @@ class SummaryService:
                     response_to_process = response
 
                 # Step 5: Re-identify summary (runs in thread pool — does not block event loop)
-                final_summary = await presidio_deidentification_service.re_identify_summary_async(
-                    db=db,
-                    vault_id=vault_id,
-                    summary_text=response_to_process,
-                )
+                if presidio_enabled and vault_id:
+                    final_summary = await presidio_deidentification_service.re_identify_summary_async(
+                        db=db,
+                        vault_id=vault_id,
+                        summary_text=response_to_process,
+                    )
+                else:
+                    final_summary = response_to_process
                 
                 # Step 5: Track usage
                 if user_id and db:
@@ -541,11 +544,14 @@ class SummaryService:
                     response_to_process = response
 
                 # Step 4: Re-identify the response (runs in thread pool — does not block event loop)
-                final_summary = await presidio_deidentification_service.re_identify_summary_async(
-                    db=db,
-                    vault_id=vault_id,
-                    summary_text=response_to_process,
-                )
+                if presidio_enabled and vault_id:
+                    final_summary = await presidio_deidentification_service.re_identify_summary_async(
+                        db=db,
+                        vault_id=vault_id,
+                        summary_text=response_to_process,
+                    )
+                else:
+                    final_summary = response_to_process
                 
                 # Track usage
                 if user_id and db:
