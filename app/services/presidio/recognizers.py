@@ -29,7 +29,7 @@ TimeRecognizer = PatternRecognizer(
 hospital_patterns = [
     Pattern(
         "Hospital",
-        r"\b(?:[A-Z][a-z.]+(?:'s?)?\s+){1,5}"
+        r"\b(?:[A-Z][a-z.]+(?:['’\u2018\u2019]s?)?[ \t]+){1,5}"
         r"(?:Hospital|Clinic|Medical Center|Health Center|Health System|"
         r"Medical Group|Diagnostic Laboratory|Recovery Center|Pharmacy)\b",
         0.95
@@ -67,7 +67,7 @@ doctor_patterns = [
 DoctorRecognizer = PatternRecognizer(
     supported_entity="PROVIDER",
     patterns=doctor_patterns,
-    global_regex_flags=re.MULTILINE | re.DOTALL,
+    global_regex_flags=re.MULTILINE,
     name="Doctor_Recognizer"
 )
 
@@ -77,7 +77,7 @@ name_patterns = [
     Pattern("Alias Label", r"\b(?:Alias|AKA|Also known as|Goes by)[:\s]+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})\b", 0.95),
     Pattern("Emergency Contact", r"\b(?:Emergency\s+Contact|Spouse|Relative)[:\s\n]+(?:Name[:\s]+)?([A-Z][a-z]+(?:[\s-][A-Z][a-z]+){1,2})\b", 0.95),
     Pattern("Name with Salutation", r"\b(?:Mr\.|Ms\.|Mrs\.|Miss)\s+([A-Z][a-z]+)\s+([A-Z][a-z]+)\b", 0.95),
-    Pattern("Contextual Full Name", r"\b([A-Z][a-z]+)\s([A-Z][a-z]+)\b", 0.85) 
+    Pattern("Contextual Full Name", r"\b(?!(?:Medical|Center|Hospital|Clinic|Health|Pharmacy|Group|System|Laboratory)\b)([A-Z][a-z]+)\s(?!(?:Medical|Center|Hospital|Clinic|Health|Pharmacy|Group|System|Laboratory)\b)([A-Z][a-z]+)\b", 0.85) 
 ]
 
 FullNameRecognizer = PatternRecognizer(
@@ -170,12 +170,12 @@ MACAddressRecognizer = PatternRecognizer(
 
 # Sub-Address Detection (Apartment, Suite, Room, Unit)
 sub_address_patterns = [
-    Pattern("Apartment", r"\bAp(?:art)?(?:ment|t)\.?\s*#?\s*[A-Za-z0-9]{1,6}\b", 0.99),
-    Pattern("Suite", r"\bS(?:ui)?te\.?\s*#?\s*[A-Za-z0-9]{1,6}\b", 0.99),
-    Pattern("Room Number", r"\bR(?:oo)?m\.?\s*#?\s*\d{1,4}[A-Za-z]?\b", 0.85),
-    Pattern("Floor", r"\bFl(?:oor)?\.?\s*#?\s*\d{1,3}[A-Za-z]?\b", 0.85),
-    Pattern("Unit", r"\bUnit\s*#?\s*[A-Za-z0-9]{1,6}\b", 0.95),
-    Pattern("PO Box", r"\bP\.?\s*O\.?\s*Box\s+\d{1,6}\b", 0.99),
+    Pattern("Apartment", r"\b(?:Apt\.?|Apartment)\b\s*#?\s*[A-Za-z0-9]{1,6}\b", 0.99),
+    Pattern("Suite", r"\b(?:Suite|Ste\.?)\b\s*#?\s*[A-Za-z0-9]{1,6}\b", 0.99),
+    Pattern("Room Number", r"\b(?:Room|Rm\.?)\b\s*#?\s*\d{1,4}[A-Za-z]?\b", 0.85),
+    Pattern("Floor", r"\b(?:Floor|Fl\.?)\b\s*#?\s*\d{1,3}[A-Za-z]?\b", 0.85),
+    Pattern("Unit", r"\bUnit\b\s*#?\s*[A-Za-z0-9]{1,6}\b", 0.95),
+    Pattern("PO Box", r"\bP\.?\s*O\.?\s*Box\b\s+\d{1,6}\b", 0.99),
 ]
 SubAddressRecognizer = PatternRecognizer(
     supported_entity="SUB_ADDRESS",

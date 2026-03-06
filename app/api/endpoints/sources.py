@@ -1027,6 +1027,7 @@ async def get_entity_source(
 
         # Extract highlight term using centralized service
         highlight_term = None
+        lab_item = None
 
         if entity_type == "timeline":
             # For timeline events, get the actual event description from the extraction
@@ -1051,6 +1052,53 @@ async def get_entity_source(
                 snippet=entity_source.snippet,
                 entity_type=entity_type,
             )
+
+        # For labs with repeated test names on the same page (e.g., multiple WBC
+        # values across dates), disambiguate using test_name + value (+ date).
+        # This prevents "WBC" from always highlighting the first row occurrence.
+        if entity_type == "lab":
+            try:
+                extraction = extraction_repository.get_by_case_id(db, case_id)
+                labs = (
+                    (extraction.extracted_data or {}).get("labs", [])
+                    if extraction and isinstance(extraction.extracted_data, dict)
+                    else []
+                )
+                lab_index = None
+                if ":" in entity_id:
+                    suffix = entity_id.split(":", 1)[1]
+                    if suffix.isdigit():
+                        lab_index = int(suffix)
+                elif str(entity_id).isdigit():
+                    lab_index = int(entity_id)
+
+                if lab_index is not None and 0 <= lab_index < len(labs):
+                    candidate = labs[lab_index]
+                    if isinstance(candidate, dict):
+                        lab_item = candidate
+                        test_name = str(candidate.get("test_name") or "").strip()
+                        value = str(candidate.get("value") or "").strip()
+                        date = str(candidate.get("date") or "").strip()
+                        # Prefer value-aware term; include date to further reduce
+                        # collisions when many same-name values appear.
+                        if test_name and value and date:
+                            highlight_term = f"{test_name} {value} {date}"
+                        elif test_name and value:
+                            highlight_term = f"{test_name} {value}"
+                        elif test_name:
+                            highlight_term = test_name
+                        logger.info(
+                            "[EVIDENCE] Lab disambiguation term for %s: '%s' (index=%s, value=%s, date=%s)",
+                            entity_id,
+                            (highlight_term or "")[:120],
+                            lab_index,
+                            value,
+                            date,
+                        )
+            except Exception as e:
+                logger.warning(
+                    f"[EVIDENCE] Could not build value-aware lab highlight term for {entity_id}: {e}"
+                )
 
         # Get chunk data if chunk_id exists (for text-based highlighting)
         # CRITICAL: Validate chunk contains entity text and find correct page
@@ -1189,6 +1237,61 @@ async def get_entity_source(
 
         # Build chunk_data if we have a chunk
         if correct_chunk:
+            # For labs, try to recalculate a row-specific bbox from word-level
+            # segments using value/date-aware terms. This fixes repeated test-name
+            # rows on the same page that would otherwise all highlight first match.
+            if entity_type == "lab" and getattr(correct_chunk, "word_segments", None):
+                try:
+                    from app.utils.bbox_utils import find_term_bbox
+
+                    terms_to_try = []
+                    if isinstance(lab_item, dict):
+                        test_name = str(lab_item.get("test_name") or "").strip()
+                        value = str(lab_item.get("value") or "").strip()
+                        date = str(lab_item.get("date") or "").strip()
+                        unit = str(lab_item.get("unit") or "").strip()
+                        reference_range = str(lab_item.get("reference_range") or "").strip()
+
+                        if test_name and value and date:
+                            terms_to_try.append(f"{test_name} {value} {date}")
+                            terms_to_try.append(f"{test_name} {date} {value}")
+                        if test_name and value and unit:
+                            terms_to_try.append(f"{test_name} {value} {unit}")
+                        if test_name and value and reference_range:
+                            terms_to_try.append(f"{test_name} {value} {reference_range}")
+                        if test_name and value:
+                            terms_to_try.append(f"{test_name} {value}")
+                        if test_name:
+                            terms_to_try.append(test_name)
+                    elif highlight_term:
+                        terms_to_try.append(highlight_term)
+
+                    # De-duplicate while preserving order.
+                    seen = set()
+                    ordered_terms = []
+                    for t in terms_to_try:
+                        if t and t not in seen:
+                            ordered_terms.append(t)
+                            seen.add(t)
+
+                    for term in ordered_terms:
+                        precise_bbox = find_term_bbox(term, correct_chunk.word_segments)
+                        if precise_bbox:
+                            entity_source.bbox = precise_bbox
+                            # Keep highlight term aligned with bbox term for better
+                            # frontend text fallback behavior.
+                            highlight_term = term
+                            logger.info(
+                                "[EVIDENCE] Using value-aware lab bbox term '%s' for %s",
+                                term[:80],
+                                entity_id,
+                            )
+                            break
+                except Exception as e:
+                    logger.warning(
+                        f"[EVIDENCE] Failed recalculating lab bbox for {entity_id}: {e}"
+                    )
+
             chunk_data = {
                 "chunk_id": correct_chunk.id,
                 "chunk_text": correct_chunk.chunk_text,

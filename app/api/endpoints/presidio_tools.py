@@ -153,7 +153,7 @@ def analyze_text_advanced(request: AdvancedAnalyzeRequest):
             ("PASSPORT", r"\b[A-Z]\d{8,9}\b", 0),
             ("DRIVERS_LICENSE", r"\b[A-Z]\d{6,8}\b", 0),
             ("MAC_ADDRESS", r"\b(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b", 0),
-            ("SUB_ADDRESS", r"\b(?:Ap(?:art)?(?:ment|t)\.?|S(?:ui)?te\.?|Unit|Room\.?|Floor\.?|PO Box)\s*#?\s*[A-Za-z0-9-]{1,6}\b", 0),
+            ("SUB_ADDRESS", r"\b(?:Apt\.?|Apartment|Suite|Ste\.?|Unit|Room|Rm\.?|Floor|Fl\.?|PO Box)\b\s*#?\s*[A-Za-z0-9-]{1,6}\b", 0),
             ("TIME", r"\b\d{1,2}:\d{2}\s?(?:AM|PM|am|pm)\b", 0),
             # Explicit labeled fields from the production deterministic pass
             ("PERSON", r"\b(?:Patient(?:\s+Name)?|Name|PT):\s+([A-Z][a-z]+(?:[ \t-][A-Z][a-z]+){1,3})\b", 1),
