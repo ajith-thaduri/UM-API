@@ -297,31 +297,45 @@ class EntitySourceService:
         
         # Helper to prepare source data dictionary
         def prepare_source_data(entity_type, entity_id, item, idx, source):
-            if not source:
-                return None
-                
+            source = source or {}
+
+            # Prefer inline source metadata attached directly to the extracted item.
+            # These are per-item mappings and are more precise than positional matching.
+            inline_file_id = item.get("source_file_id") if isinstance(item, dict) else None
+            inline_page = item.get("source_page") if isinstance(item, dict) else None
+            inline_bbox = item.get("bbox") if isinstance(item, dict) else None
+
             chunk_id = source.get("chunk_id")
-            file_id = source.get("file_id") or (item.get("source_file") if isinstance(item, dict) else None)
-            page_number = source.get("page_number") or (item.get("source_page") if isinstance(item, dict) else None)
-            
+            file_id = inline_file_id or source.get("file_id") or (item.get("source_file") if isinstance(item, dict) else None)
+            page_number = inline_page or source.get("page_number")
+            bbox = inline_bbox or source.get("bbox")
+
             # Require valid location data
             if not (chunk_id or (file_id and page_number)):
                 return None
-                
+
             return {
                 "entity_type": entity_type,
                 "entity_id": entity_id,
                 "chunk_id": chunk_id,
                 "file_id": file_id,
                 "page_number": page_number,
-                "bbox": source.get("bbox"),
+                "bbox": bbox,
                 "snippet": item.get("name", "")[:200] if isinstance(item, dict) else str(item)[:200]
             }
 
         # 1. Medications
         for idx, med in enumerate(extracted_data.get("medications", [])):
             med_name = med.get("name", "") if isinstance(med, dict) else str(med)
-            source = self._find_source_for_item(extraction_sources, "medication", idx, chunk_lookup, entity_name=med_name)
+            source = self._find_source_for_item(
+                extraction_sources,
+                "medication",
+                idx,
+                chunk_lookup,
+                entity_name=med_name,
+                preferred_file_id=med.get("source_file_id") if isinstance(med, dict) else None,
+                preferred_page_number=med.get("source_page") if isinstance(med, dict) else None,
+            )
             data = prepare_source_data("medication", f"medication:{idx}", med, idx, source)
             if data:
                 sources_to_create.append(data)
@@ -329,7 +343,15 @@ class EntitySourceService:
         # 2. Labs
         for idx, lab in enumerate(extracted_data.get("labs", [])):
             lab_name = lab.get("test_name", "") if isinstance(lab, dict) else str(lab)
-            source = self._find_source_for_item(extraction_sources, "lab", idx, chunk_lookup, entity_name=lab_name)
+            source = self._find_source_for_item(
+                extraction_sources,
+                "lab",
+                idx,
+                chunk_lookup,
+                entity_name=lab_name,
+                preferred_file_id=lab.get("source_file_id") if isinstance(lab, dict) else None,
+                preferred_page_number=lab.get("source_page") if isinstance(lab, dict) else None,
+            )
             data = prepare_source_data("lab", f"lab:{idx}", lab, idx, source)
             if data:
                 # Update snippet for labs
@@ -340,14 +362,29 @@ class EntitySourceService:
         for idx, dx in enumerate(extracted_data.get("diagnoses", [])):
             if isinstance(dx, dict):
                 dx_name = dx.get("name", "")
-                source = self._find_source_for_item(extraction_sources, "diagnosis", idx, chunk_lookup, entity_name=dx_name)
+                source = self._find_source_for_item(
+                    extraction_sources,
+                    "diagnosis",
+                    idx,
+                    chunk_lookup,
+                    entity_name=dx_name,
+                    preferred_file_id=dx.get("source_file_id"),
+                    preferred_page_number=dx.get("source_page"),
+                )
                 data = prepare_source_data("diagnosis", f"diagnosis:{idx}", dx, idx, source)
                 if data:
                     sources_to_create.append(data)
                     
         # 4. Vitals
         for idx, vital in enumerate(extracted_data.get("vitals", [])):
-            source = self._find_source_for_item(extraction_sources, "vital", idx, chunk_lookup)
+            source = self._find_source_for_item(
+                extraction_sources,
+                "vital",
+                idx,
+                chunk_lookup,
+                preferred_file_id=vital.get("source_file_id") if isinstance(vital, dict) else None,
+                preferred_page_number=vital.get("source_page") if isinstance(vital, dict) else None,
+            )
             data = prepare_source_data("vital", f"vital:{idx}", vital, idx, source)
             if data:
                 # Update snippet for vitals
@@ -368,7 +405,9 @@ class EntitySourceService:
         source_type: str,
         item_index: int,
         chunk_lookup: Dict[str, Dict],
-        entity_name: Optional[str] = None
+        entity_name: Optional[str] = None,
+        preferred_file_id: Optional[str] = None,
+        preferred_page_number: Optional[int] = None,
     ) -> Optional[Dict]:
         """
         Find source reference for an item by type and index.
@@ -391,7 +430,25 @@ class EntitySourceService:
         
         logger.debug(f"[SOURCE_LINKING] Finding source for {source_type}:{item_index}, found {len(type_sources)} sources of this type")
         
-        # Strategy 1: Try to get source at index (most common case)
+        # Strategy 1: Prefer exact file/page match when inline source metadata
+        # is available on the extracted item.
+        if preferred_file_id and preferred_page_number and type_sources:
+            for source in type_sources:
+                src_file = source.get("file_id")
+                src_page = source.get("page_number")
+                if src_file == preferred_file_id and src_page == preferred_page_number:
+                    chunk_id = source.get("chunk_id")
+                    if chunk_id and chunk_id in chunk_lookup:
+                        chunk_data = chunk_lookup[chunk_id]
+                        source["bbox"] = chunk_data.get("bbox")
+                    logger.debug(
+                        "[SOURCE_LINKING] Found source by inline file/page for %s:%s: "
+                        "chunk_id=%s, file_id=%s, page=%s",
+                        source_type, item_index, chunk_id, src_file, src_page
+                    )
+                    return source
+
+        # Strategy 2: Try to get source at index (most common case)
         if item_index < len(type_sources):
             source = type_sources[item_index]
             # Enhance with chunk data if available
@@ -403,7 +460,7 @@ class EntitySourceService:
             logger.debug(f"[SOURCE_LINKING] Found source at index {item_index}: chunk_id={chunk_id}, file_id={source.get('file_id')}, page={source.get('page_number')}")
             return source
         
-        # Strategy 2: If entity_name provided, try to match by text similarity
+        # Strategy 3: If entity_name provided, try to match by text similarity
         # This helps when chunks are distributed differently than entity indices
         if entity_name and type_sources:
             entity_name_lower = entity_name.lower().strip()
@@ -433,7 +490,7 @@ class EntitySourceService:
                 logger.debug(f"[SOURCE_LINKING] Found source by text match for '{entity_name}': chunk_id={chunk_id}, file_id={best_match.get('file_id')}, page={best_match.get('page_number')}")
                 return best_match
         
-        # Strategy 3: Fallback to first source of this type
+        # Strategy 4: Fallback to first source of this type
         if type_sources:
             source = type_sources[0]
             chunk_id = source.get("chunk_id")

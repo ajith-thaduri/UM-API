@@ -410,7 +410,9 @@ async def get_timeline_source(
                 ),
                 "full_text": page_text,
                 "term": source_validation_service.extract_highlight_term(
-                    description=event.get("description"), snippet=page_text
+                    description=event.get("description"),
+                    snippet=page_text,
+                    entity_type="timeline",
                 ),
                 "chunk": None,
             }
@@ -483,27 +485,9 @@ async def get_source(
                 file_name = case_file.file_name
 
         highlight_term = source_validation_service.extract_highlight_term(
-            snippet=entity_source.snippet
+            snippet=entity_source.snippet,
+            entity_type=data_type,
         )
-        # For diagnosis: use full name from extraction so highlight matches the exact phrase
-        if data_type == "diagnosis":
-            try:
-                extraction = extraction_repository.get_by_case_id(db, case_id)
-                if extraction and getattr(extraction, "extracted_data", None):
-                    idx = int(data_id) if str(data_id).isdigit() else None
-                    if idx is not None:
-                        diagnoses = extraction.extracted_data.get("diagnoses", [])
-                        if 0 <= idx < len(diagnoses):
-                            item = diagnoses[idx]
-                            name = (
-                                item.get("name", "").strip()
-                                if isinstance(item, dict)
-                                else str(item).strip()
-                            )
-                            if name:
-                                highlight_term = name
-            except (ValueError, TypeError, IndexError):
-                pass
 
         chunk_data = None
         correct_chunk = None
@@ -813,7 +797,8 @@ async def get_source(
 
     if not source_info.get("term"):
         source_info["term"] = source_validation_service.extract_highlight_term(
-            snippet=source_info.get("snippet")
+            snippet=source_info.get("snippet"),
+            entity_type=data_type,
         )
 
     try:
@@ -1054,45 +1039,18 @@ async def get_entity_source(
                 db, case_id, event_id
             )
             highlight_term = source_validation_service.extract_highlight_term(
-                description=description, snippet=entity_source.snippet
+                description=description,
+                snippet=entity_source.snippet,
+                entity_type="timeline",
             )
         else:
-            # For other entities, extract from snippet
+            # For non-timeline entities, extract from snippet.
+            # entity_type is forwarded so that diagnoses/procedures get their
+            # full canonical name returned instead of a truncated substring.
             highlight_term = source_validation_service.extract_highlight_term(
-                snippet=entity_source.snippet
+                snippet=entity_source.snippet,
+                entity_type=entity_type,
             )
-            # For diagnosis: prefer full name from extraction so we highlight the exact
-            # phrase (e.g. "Acute Hypoxic Respiratory Failure") and not a substring
-            # (e.g. "acute" in "acute ST-segment changes") which would match the wrong place
-            if entity_type == "diagnosis":
-                try:
-                    extraction = extraction_repository.get_by_case_id(db, case_id)
-                    if extraction and getattr(extraction, "extracted_data", None):
-                        raw_id = (
-                            entity_id.replace("diagnosis:", "")
-                            if entity_id.startswith("diagnosis:")
-                            else entity_id
-                        )
-                        idx = int(raw_id) if str(raw_id).isdigit() else None
-                        if idx is not None:
-                            diagnoses = extraction.extracted_data.get("diagnoses", [])
-                            if 0 <= idx < len(diagnoses):
-                                item = diagnoses[idx]
-                                canonical_name = (
-                                    item.get("name", "").strip()
-                                    if isinstance(item, dict)
-                                    else str(item).strip()
-                                )
-                                if canonical_name:
-                                    highlight_term = canonical_name
-                                    logger.info(
-                                        "[EVIDENCE] Using diagnosis name from extraction for highlight: %s",
-                                        highlight_term[:80] + "..." if len(highlight_term) > 80 else highlight_term,
-                                    )
-                except (ValueError, TypeError, IndexError) as e:
-                    logger.warning(
-                        f"[EVIDENCE] Could not resolve diagnosis name from extraction: {e}"
-                    )
 
         # Get chunk data if chunk_id exists (for text-based highlighting)
         # CRITICAL: Validate chunk contains entity text and find correct page
@@ -1760,7 +1718,9 @@ async def get_entity_source(
                 ),
                 "full_text": page_text or "",
                 "term": source_validation_service.extract_highlight_term(
-                    description=event.get("description"), snippet=page_text
+                    description=event.get("description"),
+                    snippet=page_text,
+                    entity_type="timeline",
                 ),
             }
 
@@ -1824,7 +1784,8 @@ async def get_entity_source(
             f"[EVIDENCE] Extracting highlight term from snippet: snippet_length={len(source_info.get('snippet', '') or '')}"
         )
         source_info["term"] = source_validation_service.extract_highlight_term(
-            snippet=source_info.get("snippet")
+            snippet=source_info.get("snippet"),
+            entity_type=entity_type,
         )
         logger.debug(f"[EVIDENCE] Extracted highlight term: {source_info.get('term')}")
 

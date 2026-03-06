@@ -276,3 +276,78 @@ def test_create_entity_source_with_validation_fails(entity_source_service, mock_
     
     assert entity_source is None
     assert error is not None
+
+
+def test_find_source_for_item_prefers_inline_file_page(entity_source_service):
+    """Inline file/page metadata should override fragile index-based matching."""
+    extraction_sources = [
+        {"type": "lab", "chunk_id": "chunk-a", "file_id": "file-1", "page_number": 1},
+        {"type": "lab", "chunk_id": "chunk-b", "file_id": "file-1", "page_number": 2},
+    ]
+    chunk_lookup = {
+        "chunk-a": {"bbox": {"x0": 1, "y0": 1, "x1": 2, "y1": 2}},
+        "chunk-b": {"bbox": {"x0": 3, "y0": 3, "x1": 4, "y1": 4}},
+    }
+
+    # Even though item_index=0 would normally pick chunk-a, preferred file/page
+    # should force chunk-b.
+    source = entity_source_service._find_source_for_item(
+        extraction_sources=extraction_sources,
+        source_type="lab",
+        item_index=0,
+        chunk_lookup=chunk_lookup,
+        entity_name="WBC",
+        preferred_file_id="file-1",
+        preferred_page_number=2,
+    )
+
+    assert source is not None
+    assert source.get("chunk_id") == "chunk-b"
+    assert source.get("page_number") == 2
+    assert source.get("bbox") == {"x0": 3, "y0": 3, "x1": 4, "y1": 4}
+
+
+def test_create_sources_from_extraction_prefers_inline_source_fields(entity_source_service, mock_db):
+    """Per-item source_file_id/source_page/bbox must win over mismatched source list."""
+    extracted_data = {
+        "medications": [],
+        "diagnoses": [],
+        "vitals": [],
+        "labs": [
+            {
+                "test_name": "WBC",
+                "value": "11.5",
+                "date": "03/04/2025",
+                "source_file_id": "file-correct",
+                "source_page": 4,
+                "bbox": {"x0": 10, "y0": 20, "x1": 30, "y1": 40},
+            }
+        ],
+    }
+    extraction_sources = [
+        # Intentionally wrong page/source to ensure inline metadata is preferred.
+        {"type": "lab", "chunk_id": "chunk-wrong", "file_id": "file-wrong", "page_number": 1}
+    ]
+    file_lookup = {"file-correct": "labs.pdf"}
+
+    with patch.object(entity_source_service, "bulk_create_entity_sources") as mock_bulk_create, \
+         patch.object(entity_source_service.entity_source_repo, "count", return_value=0):
+        mock_bulk_create.return_value = 1
+        entity_source_service.create_sources_from_extraction(
+            db=mock_db,
+            case_id="case-1",
+            user_id="user-1",
+            extracted_data=extracted_data,
+            extraction_sources=extraction_sources,
+            file_lookup=file_lookup,
+        )
+
+        assert mock_bulk_create.call_count == 1
+        sources_passed = mock_bulk_create.call_args[0][1]
+        assert len(sources_passed) == 1
+        created = sources_passed[0]
+        assert created["entity_type"] == "lab"
+        assert created["entity_id"] == "lab:0"
+        assert created["file_id"] == "file-correct"
+        assert created["page_number"] == 4
+        assert created["bbox"] == {"x0": 10, "y0": 20, "x1": 30, "y1": 40}

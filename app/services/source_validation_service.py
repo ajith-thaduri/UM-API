@@ -69,6 +69,9 @@ class SourceValidationService:
         This function intelligently extracts ONLY the key medical entity name,
         avoiding common words that appear multiple times in the document.
         
+        For diagnosis/procedure entity types, the full name is returned as-is
+        to avoid matching substrings (e.g. "acute" in unrelated sentences).
+        
         Examples:
         - "Started Gabapentin 300 mg TID (PO)" -> "Gabapentin"
         - "Creatinine: 1.4: mg/dL (ABNORMAL)" -> "Creatinine"
@@ -76,11 +79,12 @@ class SourceValidationService:
         - "Blood Pressure: 140/90 mmHg" -> "Blood Pressure"
         - "MRI - Lumbar Spine" -> "Lumbar Spine"
         - "X-ray - Chest" -> "Chest"
+        - "Acute Hypoxic Respiratory Failure" (diagnosis) -> "Acute Hypoxic Respiratory Failure"
         
         Args:
             description: Event or entity description
             snippet: Text snippet from source document
-            entity_type: Type of entity (medication, lab, timeline, etc.)
+            entity_type: Type of entity (medication, lab, timeline, diagnosis, etc.)
             
         Returns:
             Key entity name for PDF highlighting
@@ -90,9 +94,25 @@ class SourceValidationService:
         if not description and not snippet:
             return ""
         
-        # Use description first, then snippet, so snippet is used when description is absent
-        desc = (description or snippet or "").strip()
+        desc = (description or "").strip()
         snip = (snippet or "").strip()
+        
+        # For diagnosis/procedure entities the snippet is the canonical name
+        # (e.g. "Acute Hypoxic Respiratory Failure").  Return it in full so
+        # find_term_bbox matches the exact multi-word phrase on the page,
+        # avoiding false positives on substrings like "acute" elsewhere.
+        if entity_type in ("diagnosis", "procedure"):
+            full_name = (snip or desc).strip()
+            if full_name:
+                logger.info(
+                    "[EVIDENCE] Using full %s name for highlight: '%s'",
+                    entity_type, full_name[:80],
+                )
+                return full_name
+        
+        # If description is empty, fall back to snippet for the pattern matching below
+        if not desc:
+            desc = snip
         
         # Words to NEVER highlight (too common, appear multiple times)
         stop_words = {

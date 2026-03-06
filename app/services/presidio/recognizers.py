@@ -407,12 +407,13 @@ UsernameRecognizer = PatternRecognizer(
 
 # Patient Filenames
 filename_patterns = [
-    Pattern("Image Filename", r"\b[a-z0-9._-]+\.(?:jpg|jpeg|png|gif|pdf|doc|docx|txt)\b", 0.85)
+    Pattern("Generic Filename", r"\b[a-zA-Z0-9._-]+\.(?:jpg|jpeg|png|gif|pdf|doc|docx|txt|dcm|tif|tiff|csv|xls|xlsx|ppt|pptx|mp4|avi|mov|zip|rtf)\b", 0.90)
 ]
 FilenameRecognizer = PatternRecognizer(
     supported_entity="FILENAME",
     patterns=filename_patterns,
-    context=["file", "photo", "image", "upload", "attachment"],
+    context=["file", "photo", "image", "upload", "attachment", "scan", "mri", "xray", "ct", "dicom"],
+    global_regex_flags=re.IGNORECASE,
     name="Filename_Recognizer"
 )
 

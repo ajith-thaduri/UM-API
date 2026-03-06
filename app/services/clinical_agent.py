@@ -420,6 +420,60 @@ Admission information, chief complaint, and hospital course.
                 )
             
             # Source matching for comprehensive
+            # NOTE: This must be instance-aware (especially for repeated labs such as
+            # "WBC" across multiple dates). Pure name-only first-match links multiple
+            # items to the same earliest chunk and causes wrong source pages.
+            source_usage: Dict[tuple, int] = {}
+
+            def _normalize_text(value: Any) -> str:
+                return " ".join(str(value or "").lower().split())
+
+            def _date_variants(raw_date: Any) -> List[str]:
+                text = str(raw_date or "").strip()
+                if not text:
+                    return []
+                variants = {text.lower()}
+                if "/" in text:
+                    parts = text.split("/")
+                    if len(parts) == 3:
+                        mm, dd, yyyy = parts[0], parts[1], parts[2]
+                        variants.add(f"{mm}/{dd}/{yyyy}")
+                        variants.add(f"{mm}-{dd}-{yyyy}")
+                        variants.add(f"{yyyy}-{mm.zfill(2)}-{dd.zfill(2)}")
+                return [v for v in variants if v]
+
+            def _score_item_chunk(item: Dict[str, Any], source_type: str, chunk_text: str, search_term: str) -> int:
+                term_norm = _normalize_text(search_term)
+                if not term_norm or term_norm not in chunk_text:
+                    return -1
+
+                # Base confidence for finding the primary entity term.
+                score = 10
+
+                # Instance-level disambiguation for repeated labs/vitals.
+                if source_type == "lab" and isinstance(item, dict):
+                    value = _normalize_text(item.get("value"))
+                    unit = _normalize_text(item.get("unit"))
+                    reference_range = _normalize_text(item.get("reference_range"))
+                    abnormal_flag = str(item.get("abnormal", "")).strip().lower()
+
+                    if value:
+                        score += 6 if value in chunk_text else -3
+                    if unit:
+                        score += 2 if unit in chunk_text else 0
+                    if reference_range:
+                        score += 1 if reference_range in chunk_text else 0
+                    if abnormal_flag in ("true", "false"):
+                        abnormal_token = "abnormal" if abnormal_flag == "true" else "normal"
+                        score += 1 if abnormal_token in chunk_text else 0
+
+                    for date_variant in _date_variants(item.get("date")):
+                        if date_variant in chunk_text:
+                            score += 4
+                            break
+
+                return score
+
             source_types = ["medication", "lab", "diagnosis", "procedure", "vital", "allergy", "imaging"]
             for source_type in source_types:
                 data_key = {
@@ -433,31 +487,62 @@ Admission information, chief complaint, and hospital course.
                     if not search_term or len(search_term) < 2:
                         continue
 
-                    for chunk in context.chunks:
-                        if search_term.lower() in chunk.chunk_text.lower():
-                            # Compute tight term bbox; fall back to coarse chunk union bbox
-                            precise_bbox = (
-                                find_term_bbox(search_term, chunk.word_segments)
-                                if chunk.word_segments
-                                else None
-                            ) or (chunk.bbox if hasattr(chunk, "bbox") else None)
+                    usage_key = (source_type, _normalize_text(search_term))
+                    best_chunk = None
+                    best_score = -10**9
 
-                            item.update({
-                                "source_file_id": chunk.file_id,
-                                "source_page": chunk.page_number,
-                                "bbox": precise_bbox,
-                            })
-                            all_sources.append({
-                                "type": source_type,
-                                "chunk_id": chunk.chunk_id,
-                                "vector_id": chunk.vector_id,
-                                "file_id": chunk.file_id,
-                                "page_number": chunk.page_number,
-                                "section_type": chunk.section_type.value,
-                                "score": chunk.score,
-                                "bbox": precise_bbox,
-                            })
-                            break
+                    for chunk in context.chunks:
+                        chunk_text = _normalize_text(getattr(chunk, "chunk_text", ""))
+                        if not chunk_text:
+                            continue
+
+                        score = _score_item_chunk(item, source_type, chunk_text, search_term)
+                        if score < 0:
+                            continue
+
+                        # Softly discourage reusing the exact same chunk for repeated
+                        # same-name entities so later instances can map to later pages.
+                        reuse_penalty = source_usage.get((usage_key, chunk.chunk_id), 0) * 4
+                        score -= reuse_penalty
+
+                        if score > best_score:
+                            best_score = score
+                            best_chunk = chunk
+
+                    if best_chunk:
+                        bbox_term = search_term
+                        if source_type == "lab" and isinstance(item, dict):
+                            test_name = str(item.get("test_name") or "").strip()
+                            value = str(item.get("value") or "").strip()
+                            if test_name and value:
+                                bbox_term = f"{test_name} {value}"
+
+                        precise_bbox = (
+                            find_term_bbox(bbox_term, best_chunk.word_segments)
+                            if best_chunk.word_segments
+                            else None
+                        )
+                        if not precise_bbox and bbox_term != search_term and best_chunk.word_segments:
+                            precise_bbox = find_term_bbox(search_term, best_chunk.word_segments)
+                        if not precise_bbox:
+                            precise_bbox = best_chunk.bbox if hasattr(best_chunk, "bbox") else None
+
+                        item.update({
+                            "source_file_id": best_chunk.file_id,
+                            "source_page": best_chunk.page_number,
+                            "bbox": precise_bbox,
+                        })
+                        all_sources.append({
+                            "type": source_type,
+                            "chunk_id": best_chunk.chunk_id,
+                            "vector_id": best_chunk.vector_id,
+                            "file_id": best_chunk.file_id,
+                            "page_number": best_chunk.page_number,
+                            "section_type": best_chunk.section_type.value,
+                            "score": best_chunk.score,
+                            "bbox": precise_bbox,
+                        })
+                        source_usage[(usage_key, best_chunk.chunk_id)] = source_usage.get((usage_key, best_chunk.chunk_id), 0) + 1
             all_chunks.extend([c.chunk_id for c in context.chunks])
         except Exception as e:
             logger.error(f"Error processing comprehensive result: {e}")
