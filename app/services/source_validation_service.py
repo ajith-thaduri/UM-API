@@ -90,7 +90,8 @@ class SourceValidationService:
         if not description and not snippet:
             return ""
         
-        desc = (description or "").strip()
+        # Use description first, then snippet, so snippet is used when description is absent
+        desc = (description or snippet or "").strip()
         snip = (snippet or "").strip()
         
         # Words to NEVER highlight (too common, appear multiple times)

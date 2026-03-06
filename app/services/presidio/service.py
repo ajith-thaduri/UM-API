@@ -101,7 +101,7 @@ class PresidioDeIdentificationService:
         text = re.sub(r"\b(State):[ \t]+(?:Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|Delaware|Florida|Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|Kentucky|Louisiana|Maine|Maryland|Massachusetts|Michigan|Minnesota|Mississippi|Missouri|Montana|Nebraska|Nevada|New[ \t]Hampshire|New[ \t]Jersey|New[ \t]Mexico|New[ \t]York|North[ \t]Carolina|North[ \t]Dakota|Ohio|Oklahoma|Oregon|Pennsylvania|Rhode[ \t]Island|South[ \t]Carolina|South[ \t]Dakota|Tennessee|Texas|Utah|Vermont|Virginia|Washington|West[ \t]Virginia|Wisconsin|Wyoming)\b", r"\1: [[LOCATION-01]]", text, flags=re.IGNORECASE)
 
         # 6. URL
-        text = re.sub(r"\b(URL|Website|Web|Link|Patient\s+Portal)[:\s]+(?:https?://|www[:.]?)[a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+(?:/[a-zA-Z0-9._?=&%-]*)?\b", r"\1: [[URL-01]]", text, flags=re.IGNORECASE)
+        text = re.sub(r"\b(URL|Website|Web|Link|Patient\s+Portal)[:\s]+(?:https?://|www[:.]?)[a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+(?:/[a-zA-Z0-9._?=&%/#~+-]*)?\b", r"\1: [[URL-01]]", text, flags=re.IGNORECASE)
 
         return text
 

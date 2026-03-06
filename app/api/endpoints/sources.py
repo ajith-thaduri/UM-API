@@ -485,6 +485,25 @@ async def get_source(
         highlight_term = source_validation_service.extract_highlight_term(
             snippet=entity_source.snippet
         )
+        # For diagnosis: use full name from extraction so highlight matches the exact phrase
+        if data_type == "diagnosis":
+            try:
+                extraction = extraction_repository.get_by_case_id(db, case_id)
+                if extraction and getattr(extraction, "extracted_data", None):
+                    idx = int(data_id) if str(data_id).isdigit() else None
+                    if idx is not None:
+                        diagnoses = extraction.extracted_data.get("diagnoses", [])
+                        if 0 <= idx < len(diagnoses):
+                            item = diagnoses[idx]
+                            name = (
+                                item.get("name", "").strip()
+                                if isinstance(item, dict)
+                                else str(item).strip()
+                            )
+                            if name:
+                                highlight_term = name
+            except (ValueError, TypeError, IndexError):
+                pass
 
         chunk_data = None
         correct_chunk = None
@@ -1042,6 +1061,38 @@ async def get_entity_source(
             highlight_term = source_validation_service.extract_highlight_term(
                 snippet=entity_source.snippet
             )
+            # For diagnosis: prefer full name from extraction so we highlight the exact
+            # phrase (e.g. "Acute Hypoxic Respiratory Failure") and not a substring
+            # (e.g. "acute" in "acute ST-segment changes") which would match the wrong place
+            if entity_type == "diagnosis":
+                try:
+                    extraction = extraction_repository.get_by_case_id(db, case_id)
+                    if extraction and getattr(extraction, "extracted_data", None):
+                        raw_id = (
+                            entity_id.replace("diagnosis:", "")
+                            if entity_id.startswith("diagnosis:")
+                            else entity_id
+                        )
+                        idx = int(raw_id) if str(raw_id).isdigit() else None
+                        if idx is not None:
+                            diagnoses = extraction.extracted_data.get("diagnoses", [])
+                            if 0 <= idx < len(diagnoses):
+                                item = diagnoses[idx]
+                                canonical_name = (
+                                    item.get("name", "").strip()
+                                    if isinstance(item, dict)
+                                    else str(item).strip()
+                                )
+                                if canonical_name:
+                                    highlight_term = canonical_name
+                                    logger.info(
+                                        "[EVIDENCE] Using diagnosis name from extraction for highlight: %s",
+                                        highlight_term[:80] + "..." if len(highlight_term) > 80 else highlight_term,
+                                    )
+                except (ValueError, TypeError, IndexError) as e:
+                    logger.warning(
+                        f"[EVIDENCE] Could not resolve diagnosis name from extraction: {e}"
+                    )
 
         # Get chunk data if chunk_id exists (for text-based highlighting)
         # CRITICAL: Validate chunk contains entity text and find correct page
@@ -1191,25 +1242,11 @@ async def get_entity_source(
                     else str(correct_chunk.section_type)
                 ),
             }
-
-            # ── Precise term bbox ──────────────────────────────────────────────
-            # Try to narrow the highlight from the coarse chunk-union bbox down
-            # to just the words that make up the extracted term.
-            from app.utils.bbox_utils import find_term_bbox as _find_term_bbox
-
-            word_segs = getattr(correct_chunk, "word_segments", None)
-            if word_segs and highlight_term:
-                precise_bbox = _find_term_bbox(highlight_term, word_segs)
-                if precise_bbox:
-                    logger.debug(
-                        "[EVIDENCE] Precise term bbox computed for '%s': %s",
-                        highlight_term, precise_bbox,
-                    )
-                    entity_source.bbox = precise_bbox
-                elif not entity_source.bbox and correct_chunk.bbox:
-                    entity_source.bbox = correct_chunk.bbox
-            elif not entity_source.bbox and correct_chunk.bbox:
-                logger.debug("[EVIDENCE] Using bbox from chunk (EntitySource bbox was missing)")
+            # Use chunk bbox if EntitySource bbox is missing
+            if not entity_source.bbox and correct_chunk.bbox:
+                logger.debug(
+                    f"[EVIDENCE] Using bbox from chunk (EntitySource bbox was missing)"
+                )
                 entity_source.bbox = correct_chunk.bbox
 
         if not chunk_data:

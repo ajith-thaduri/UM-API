@@ -145,9 +145,9 @@ CountyRecognizer = PatternRecognizer(
 
 # URL Detection
 url_patterns = [
-    Pattern("Labeled URL", r"\b(?:URL|Website|Web|Link|Patient\s+Portal)[:\s]+((?:https?://|www[:.]?)[a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+(?:/[a-zA-Z0-9._?=&%-]*)?)\b", 0.99),
-    Pattern("Labeled Naked Domain", r"\b(?:URL|Website|Web|Link|Patient\s+Portal)[:\s]+([a-zA-Z0-9-]+\.(?:com|org|net|edu|gov|io|co|us|me)(?:/[a-zA-Z0-9._?=&%-]*)?)\b", 0.99),
-    Pattern("Standard Protocol URL", r"\b(?:https?://|www[:.]?)[a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+(?:/[a-zA-Z0-9._?=&%-]*)?\b", 0.95),
+    Pattern("Labeled URL", r"\b(?:URL|Website|Web|Link|Patient\s+Portal)[:\s]+((?:https?://|www[:.]?)[a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+(?:/[a-zA-Z0-9._?=&%/#~+-]*)?)\b", 0.99),
+    Pattern("Labeled Naked Domain", r"\b(?:URL|Website|Web|Link|Patient\s+Portal)[:\s]+([a-zA-Z0-9-]+\.(?:com|org|net|edu|gov|io|co|us|me)(?:/[a-zA-Z0-9._?=&%/#~+-]*)?)\b", 0.99),
+    Pattern("Standard Protocol URL", r"\b(?:https?://|www[:.]?)[a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+(?:/[a-zA-Z0-9._?=&%/#~+-]*)?\b", 0.95),
 ]
 UrlRecognizer = PatternRecognizer(
     supported_entity="URL",
