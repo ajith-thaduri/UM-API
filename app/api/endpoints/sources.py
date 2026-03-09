@@ -40,6 +40,246 @@ def get_entity_source_service() -> EntitySourceService:
     return EntitySourceService()
 
 
+def _get_timeline_events(extraction) -> list[dict]:
+    """Return detailed + summary timeline events from extraction storage."""
+    timeline_events = []
+    if not extraction:
+        return timeline_events
+
+    candidates = [getattr(extraction, "timeline", None)]
+    extracted_data = getattr(extraction, "extracted_data", None)
+    if isinstance(extracted_data, dict):
+        candidates.append(extracted_data.get("timeline"))
+
+    for timeline_data in candidates:
+        if isinstance(timeline_data, list):
+            timeline_events.extend([e for e in timeline_data if isinstance(e, dict)])
+        elif isinstance(timeline_data, dict):
+            timeline_events.extend(
+                [
+                    e
+                    for e in (
+                        (timeline_data.get("detailed", []) or [])
+                        + (timeline_data.get("summary", []) or [])
+                    )
+                    if isinstance(e, dict)
+                ]
+            )
+
+    return timeline_events
+
+
+def _get_timeline_event(extraction, event_id: str) -> dict | None:
+    """Locate one timeline event by raw or prefixed id."""
+    clean_event_id = str(event_id)
+    if clean_event_id.startswith("timeline:"):
+        clean_event_id = clean_event_id.split(":", 1)[1]
+
+    for event in _get_timeline_events(extraction):
+        candidate_id = str(event.get("id") or "")
+        if (
+            candidate_id == clean_event_id
+            or candidate_id == f"timeline:{clean_event_id}"
+            or candidate_id.endswith(clean_event_id)
+        ):
+            return event
+
+    return None
+
+
+def _resolve_timeline_lab_result_source(
+    db: Session,
+    event: dict | None,
+    fallback_file_id: str | None = None,
+    fallback_page: int | None = None,
+    preferred_chunk_id: str | None = None,
+):
+    """
+    Resolve repeated timeline lab_result events using lab-specific metadata.
+
+    Timeline lab events embed the original extracted lab in `details`, which can
+    contain `matching_chunks`, `value`, `date`, `source_file_id`, and `bbox`.
+    Reusing that metadata prevents generic name-only matches like "Glucose"
+    from jumping to the first occurrence in the file.
+    """
+    if not isinstance(event, dict) or event.get("event_type") != "lab_result":
+        return None
+
+    details = event.get("details")
+    if not isinstance(details, dict):
+        return None
+
+    from app.repositories.chunk_repository import ChunkRepository
+    from app.utils.bbox_utils import find_term_bbox
+
+    def _normalize_page_number(page_value):
+        if isinstance(page_value, int):
+            return page_value
+        if isinstance(page_value, str) and page_value.isdigit():
+            return int(page_value)
+        return None
+
+    def _date_variants(raw_date: str) -> list[str]:
+        value = str(raw_date or "").strip()
+        if not value:
+            return []
+        variants = {value.lower()}
+        if "/" in value:
+            parts = value.split("/")
+            if len(parts) == 3:
+                mm, dd, yyyy = parts
+                variants.add(f"{mm}/{dd}")
+                variants.add(f"{mm.zfill(2)}/{dd.zfill(2)}")
+                variants.add(f"{mm}-{dd}-{yyyy}")
+                variants.add(f"{yyyy}-{mm.zfill(2)}-{dd.zfill(2)}")
+        return [variant for variant in variants if variant]
+
+    def _score_chunk_text(chunk_text: str) -> int:
+        text = (chunk_text or "").lower()
+        if not text:
+            return -1
+
+        score = 0
+        if test_name:
+            if test_name in text:
+                score += 10
+            else:
+                return -1
+        if value:
+            score += 8 if value in text else -4
+        if unit and unit in text:
+            score += 2
+        if reference_range and reference_range in text:
+            score += 1
+        if abnormal_flag in ("true", "false"):
+            abnormal_token = "abnormal" if abnormal_flag == "true" else "normal"
+            if abnormal_token in text:
+                score += 1
+        for date_variant in date_variants:
+            if date_variant in text:
+                score += 6
+                break
+        return score
+
+    file_id = details.get("source_file_id") or fallback_file_id
+    initial_page = (
+        _normalize_page_number(details.get("source_page"))
+        or _normalize_page_number(event.get("source_page"))
+        or _normalize_page_number(event.get("page_number"))
+        or fallback_page
+        or 1
+    )
+    initial_bbox = details.get("bbox") if isinstance(details.get("bbox"), dict) else None
+
+    test_name = str(details.get("test_name") or "").strip().lower()
+    value = str(details.get("value") or "").strip().lower()
+    unit = str(details.get("unit") or "").strip().lower()
+    reference_range = str(details.get("reference_range") or "").strip().lower()
+    abnormal_flag = str(details.get("abnormal", "")).strip().lower()
+    date_variants = _date_variants(str(details.get("date") or "").strip())
+
+    highlight_term = None
+    test_name_raw = str(details.get("test_name") or "").strip()
+    value_raw = str(details.get("value") or "").strip()
+    date_raw = str(details.get("date") or "").strip()
+    unit_raw = str(details.get("unit") or "").strip()
+    reference_range_raw = str(details.get("reference_range") or "").strip()
+
+    if test_name_raw and value_raw and date_raw:
+        highlight_term = f"{test_name_raw} {value_raw} {date_raw}"
+    elif test_name_raw and value_raw:
+        highlight_term = f"{test_name_raw} {value_raw}"
+    elif test_name_raw:
+        highlight_term = test_name_raw
+
+    chunk_repo = ChunkRepository()
+    correct_chunk = None
+    correct_page = initial_page
+    best_score = -10**9
+
+    raw_matching_chunks = details.get("matching_chunks")
+    matching_chunk_ids = (
+        [str(chunk_id).strip() for chunk_id in raw_matching_chunks if str(chunk_id).strip()]
+        if isinstance(raw_matching_chunks, list)
+        else []
+    )
+
+    seen_chunk_ids = set()
+
+    for chunk_id in matching_chunk_ids:
+        chunk_candidate = chunk_repo.get_by_id(db, chunk_id)
+        if not chunk_candidate or not chunk_candidate.chunk_text:
+            continue
+        seen_chunk_ids.add(str(chunk_candidate.id))
+        score = _score_chunk_text(chunk_candidate.chunk_text)
+        if preferred_chunk_id and chunk_candidate.id == preferred_chunk_id:
+            score += 1
+        if score > best_score:
+            best_score = score
+            correct_chunk = chunk_candidate
+
+    # matching_chunks are helpful hints, but timeline events can carry stale or
+    # incomplete candidates. Always scan the file as well and keep the highest
+    # scoring chunk overall so repeated labs resolve to the exact value/date row.
+    if file_id:
+        all_chunks = chunk_repo.get_by_file_id(db, file_id)
+        for chunk_candidate in all_chunks:
+            if not chunk_candidate or not chunk_candidate.chunk_text:
+                continue
+            if str(chunk_candidate.id) in seen_chunk_ids:
+                continue
+            score = _score_chunk_text(chunk_candidate.chunk_text)
+            if preferred_chunk_id and chunk_candidate.id == preferred_chunk_id:
+                score += 1
+            if score > best_score:
+                best_score = score
+                correct_chunk = chunk_candidate
+
+    precise_bbox = None
+    if correct_chunk:
+        correct_page = correct_chunk.page_number or correct_page
+        file_id = correct_chunk.file_id or file_id
+        terms_to_try = []
+        if test_name_raw and value_raw and date_raw:
+            terms_to_try.append(f"{test_name_raw} {value_raw} {date_raw}")
+            terms_to_try.append(f"{test_name_raw} {date_raw} {value_raw}")
+        if test_name_raw and value_raw and unit_raw:
+            terms_to_try.append(f"{test_name_raw} {value_raw} {unit_raw}")
+        if test_name_raw and value_raw and reference_range_raw:
+            terms_to_try.append(f"{test_name_raw} {value_raw} {reference_range_raw}")
+        if test_name_raw and value_raw:
+            terms_to_try.append(f"{test_name_raw} {value_raw}")
+        if test_name_raw:
+            terms_to_try.append(test_name_raw)
+
+        seen_terms = set()
+        ordered_terms = []
+        for term in terms_to_try:
+            if term and term not in seen_terms:
+                ordered_terms.append(term)
+                seen_terms.add(term)
+
+        if getattr(correct_chunk, "word_segments", None):
+            for term in ordered_terms:
+                precise_bbox = find_term_bbox(term, correct_chunk.word_segments)
+                if precise_bbox:
+                    break
+
+        if not precise_bbox and getattr(correct_chunk, "bbox", None):
+            precise_bbox = correct_chunk.bbox
+
+    if not precise_bbox and initial_bbox and correct_page == initial_page:
+        precise_bbox = initial_bbox
+
+    return {
+        "file_id": file_id,
+        "correct_page": correct_page,
+        "bbox": precise_bbox,
+        "highlight_term": highlight_term,
+        "correct_chunk": correct_chunk,
+    }
+
+
 @router.get("/contradiction-evidence/{case_id}/{contradiction_id}")
 async def get_contradiction_sources(
     case_id: str,
@@ -165,6 +405,9 @@ async def get_timeline_source(
     if event_id.startswith("timeline:"):
         event_id = event_id.replace("timeline:", "", 1)
 
+    extraction = extraction_repository.get_by_case_id(db, case_id)
+    event = _get_timeline_event(extraction, event_id)
+
     # Try EntitySource first (preferred)
     entity_id = f"timeline:{event_id}"
     entity_source = entity_source_service.get_entity_source(
@@ -176,7 +419,7 @@ async def get_timeline_source(
     )
 
     source_info = None
-    item = {}
+    item = event or {}
 
     if entity_source:
         # Get file name
@@ -188,11 +431,15 @@ async def get_timeline_source(
                 file_name = case_file.file_name
 
         # Get event description for highlight term
-        description = source_validation_service.get_timeline_event_description(
-            db, case_id, event_id
+        description = (
+            event.get("description")
+            if isinstance(event, dict)
+            else source_validation_service.get_timeline_event_description(
+                db, case_id, event_id
+            )
         )
         highlight_term = source_validation_service.extract_highlight_term(
-            description=description, snippet=entity_source.snippet
+            description=description, snippet=entity_source.snippet, entity_type="timeline"
         )
 
         # Load chunk data if chunk_id exists
@@ -203,6 +450,29 @@ async def get_timeline_source(
         from app.repositories.chunk_repository import ChunkRepository
 
         chunk_repo = ChunkRepository()
+
+        timeline_lab_resolution = _resolve_timeline_lab_result_source(
+            db=db,
+            event=event,
+            fallback_file_id=entity_source.file_id,
+            fallback_page=correct_page,
+            preferred_chunk_id=entity_source.chunk_id,
+        )
+        if timeline_lab_resolution:
+            if timeline_lab_resolution.get("file_id") and not entity_source.file_id:
+                entity_source.file_id = timeline_lab_resolution["file_id"]
+            if timeline_lab_resolution.get("highlight_term"):
+                highlight_term = timeline_lab_resolution["highlight_term"]
+            if timeline_lab_resolution.get("bbox"):
+                entity_source.bbox = timeline_lab_resolution["bbox"]
+            if timeline_lab_resolution.get("correct_chunk"):
+                correct_chunk = timeline_lab_resolution["correct_chunk"]
+                correct_page = timeline_lab_resolution.get("correct_page") or correct_page
+                logger.info(
+                    "[EVIDENCE] Timeline lab event %s resolved to page %s via lab-specific matching",
+                    event_id,
+                    correct_page,
+                )
 
         if entity_source.chunk_id:
             try:
@@ -294,7 +564,7 @@ async def get_timeline_source(
 
         source_info = {
             "file_id": entity_source.file_id,
-            "file_name": file_name,
+            "file_name": file_name or item.get("source_file") or (item.get("details") or {}).get("source_file"),
             "page": correct_page,
             "bbox": entity_source.bbox,
             "snippet": entity_source.snippet,
@@ -325,42 +595,11 @@ async def get_timeline_source(
 
     else:
         # Fallback path: extraction.timeline
-        extraction = extraction_repository.get_by_case_id(db, case_id)
-        if not extraction or not extraction.timeline:
+        if not extraction:
             raise HTTPException(
                 status_code=404,
                 detail=f"Source not found for timeline event {event_id} in case {case_id}",
             )
-
-        # Handle different timeline formats (list vs dict)
-        timeline_data = extraction.timeline
-        timeline_events = []
-        if isinstance(timeline_data, list):
-            timeline_events = timeline_data
-        elif isinstance(timeline_data, dict):
-            # Try 'detailed' first, then 'summary'
-            timeline_events = timeline_data.get("detailed", []) + timeline_data.get("summary", [])
-        
-        # If still empty, try extracted_data
-        if not timeline_events and extraction.extracted_data:
-            timeline_data = extraction.extracted_data.get("timeline")
-            if isinstance(timeline_data, list):
-                timeline_events = timeline_data
-            elif isinstance(timeline_data, dict):
-                timeline_events = timeline_data.get("detailed", []) + timeline_data.get("summary", [])
-
-        event = next(
-            (
-                e
-                for e in timeline_events
-                if isinstance(e, dict) and (
-                    str(e.get("id")) == str(event_id) or 
-                    str(e.get("id")) == f"timeline:{event_id}" or
-                    str(e.get("id")).endswith(str(event_id))
-                )
-            ),
-            None,
-        )
 
         if not event:
             raise HTTPException(
@@ -369,14 +608,18 @@ async def get_timeline_source(
             )
 
         item = event
-        source_file = event.get("source_file")
-        source_page = event.get("source_page") or event.get("page_number")
+        source_file = event.get("source_file") or (event.get("details") or {}).get("source_file")
+        source_page = (
+            (event.get("details") or {}).get("source_page")
+            or event.get("source_page")
+            or event.get("page_number")
+        )
 
         if source_file and source_page:
             page_num = int(source_page) if str(source_page).isdigit() else 1
             source_mapping = extraction.source_mapping or {}
             files_list = source_mapping.get("files", [])
-            file_id = None
+            file_id = (event.get("details") or {}).get("source_file_id")
             if isinstance(files_list, list):
                 for file_info in files_list:
                     if (
@@ -414,8 +657,31 @@ async def get_timeline_source(
                     snippet=page_text,
                     entity_type="timeline",
                 ),
+                "bbox": (event.get("details") or {}).get("bbox"),
                 "chunk": None,
             }
+
+            timeline_lab_resolution = _resolve_timeline_lab_result_source(
+                db=db,
+                event=event,
+                fallback_file_id=file_id,
+                fallback_page=page_num,
+            )
+            if timeline_lab_resolution:
+                source_info["file_id"] = timeline_lab_resolution.get("file_id") or source_info["file_id"]
+                source_info["page"] = timeline_lab_resolution.get("correct_page") or source_info["page"]
+                source_info["bbox"] = timeline_lab_resolution.get("bbox") or source_info.get("bbox")
+                source_info["term"] = timeline_lab_resolution.get("highlight_term") or source_info.get("term")
+                resolved_chunk = timeline_lab_resolution.get("correct_chunk")
+                if resolved_chunk:
+                    source_info["chunk"] = {
+                        "chunk_id": resolved_chunk.id,
+                        "chunk_text": resolved_chunk.chunk_text,
+                        "char_start": resolved_chunk.char_start,
+                        "char_end": resolved_chunk.char_end,
+                        "section_type": str(resolved_chunk.section_type),
+                        "bbox": resolved_chunk.bbox,
+                    }
 
     if not source_info:
         raise HTTPException(
@@ -1147,20 +1413,29 @@ async def get_entity_source(
             if case_file:
                 file_name = case_file.file_name
 
+        extraction = None
+        timeline_event = None
+
         # Extract highlight term using centralized service
         highlight_term = None
         lab_item = None
         lab_matching_chunk_ids = []
 
         if entity_type == "timeline":
+            extraction = extraction_repository.get_by_case_id(db, case_id)
             # For timeline events, get the actual event description from the extraction
             event_id = (
                 entity_id.replace("timeline:", "")
                 if entity_id.startswith("timeline:")
                 else entity_id
             )
-            description = source_validation_service.get_timeline_event_description(
-                db, case_id, event_id
+            timeline_event = _get_timeline_event(extraction, event_id)
+            description = (
+                timeline_event.get("description")
+                if isinstance(timeline_event, dict)
+                else source_validation_service.get_timeline_event_description(
+                    db, case_id, event_id
+                )
             )
             highlight_term = source_validation_service.extract_highlight_term(
                 description=description,
@@ -1237,6 +1512,31 @@ async def get_entity_source(
         from app.repositories.chunk_repository import ChunkRepository
 
         chunk_repo = ChunkRepository()
+
+        timeline_lab_resolution = None
+        if entity_type == "timeline" and timeline_event:
+            timeline_lab_resolution = _resolve_timeline_lab_result_source(
+                db=db,
+                event=timeline_event,
+                fallback_file_id=entity_source.file_id,
+                fallback_page=correct_page,
+                preferred_chunk_id=entity_source.chunk_id,
+            )
+            if timeline_lab_resolution:
+                if timeline_lab_resolution.get("file_id") and not entity_source.file_id:
+                    entity_source.file_id = timeline_lab_resolution["file_id"]
+                if timeline_lab_resolution.get("highlight_term"):
+                    highlight_term = timeline_lab_resolution["highlight_term"]
+                if timeline_lab_resolution.get("bbox"):
+                    entity_source.bbox = timeline_lab_resolution["bbox"]
+                if timeline_lab_resolution.get("correct_chunk"):
+                    correct_chunk = timeline_lab_resolution["correct_chunk"]
+                    correct_page = timeline_lab_resolution.get("correct_page") or correct_page
+                    logger.info(
+                        "[EVIDENCE] Timeline entity %s resolved to page %s via lab-specific matching",
+                        entity_id,
+                        correct_page,
+                    )
 
         # For labs, prefer chunk candidates from extracted item metadata when available.
         # This helps recover when persisted EntitySource points to a generic same-name
@@ -1509,7 +1809,13 @@ async def get_entity_source(
         # This ensures we open the correct page where the entity actually appears
         source_info = {
             "file_id": entity_source.file_id,
-            "file_name": file_name,
+            "file_name": file_name
+            or (timeline_event.get("source_file") if isinstance(timeline_event, dict) else None)
+            or (
+                (timeline_event.get("details") or {}).get("source_file")
+                if isinstance(timeline_event, dict)
+                else None
+            ),
             "page": correct_page,  # Use correct page from chunk validation
             "bbox": entity_source.bbox,
             "snippet": entity_source.snippet,

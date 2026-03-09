@@ -466,6 +466,19 @@ MedicalIDRecognizer = PatternRecognizer(
     name="Medical_ID_Recognizer"
 )
 
+# Custom Phone Number Formats
+phone_patterns = [
+    Pattern("Dashed/Dotted Phone", r"\b\+?\d{1,3}[-.\s]\d{3}[-.\s]\d{3}[-.\s]\d{4}\b", 0.95),
+    Pattern("Tel Link", r"\btel:\+?\d{7,15}\b", 0.95),
+    Pattern("Standard Phone", r"\b\d{3}[-.\s]\d{3}[-.\s]\d{4}\b", 0.85),
+]
+CustomPhoneRecognizer = PatternRecognizer(
+    supported_entity="PHONE_NUMBER",
+    patterns=phone_patterns,
+    context=["phone", "tel", "mobile", "cell", "fax", "contact"],
+    name="Custom_Phone_Recognizer"
+)
+
 # ── Aggregated list of all custom recognizer instances ────────────────────────
 ALL_RECOGNIZERS = [
     MRNRecognizer,
@@ -503,4 +516,5 @@ ALL_RECOGNIZERS = [
     MedicalIDRecognizer,
     CountyRecognizer,
     UrlRecognizer,
+    CustomPhoneRecognizer,
 ]

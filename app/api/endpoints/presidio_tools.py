@@ -165,6 +165,8 @@ def analyze_text_advanced(request: AdvancedAnalyzeRequest):
             ("LOCATION", r"\b(?:County):[ \t]+([A-Z][a-z]+(?:[ \t]+[A-Z][a-z]+){0,2}[ \t]+County)\b", 1),
             ("LOCATION", r"\b(?:State):[ \t]+(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY)\b", 1),
             ("LOCATION", r"\b(?:State):[ \t]+(Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|Delaware|Florida|Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|Kentucky|Louisiana|Maine|Maryland|Massachusetts|Michigan|Minnesota|Mississippi|Missouri|Montana|Nebraska|Nevada|New[ \t]Hampshire|New[ \t]Jersey|New[ \t]Mexico|New[ \t]York|North[ \t]Carolina|North[ \t]Dakota|Ohio|Oklahoma|Oregon|Pennsylvania|Rhode[ \t]Island|South[ \t]Carolina|South[ \t]Dakota|Tennessee|Texas|Utah|Vermont|Virginia|Washington|West[ \t]Virginia|Wisconsin|Wyoming)\b", 1),
+            ("PHONE_NUMBER", r"\b(?:Phone|Tel|Mobile|Cell|Fax)[:\s]+((?:\+?\d{1,3}[-.\s])?\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4})\b", 1),
+            ("PHONE_NUMBER", r"\b(tel:\+?\d{7,15})\b", 1),
             ("URL", r"\b(?:URL|Website|Web|Link|Patient\s+Portal)[:\s]+((?:https?://|www[:.]?)[a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+(?:/[a-zA-Z0-9._?=&%/#~+-]*)?)\b", 1),
         ]
         
