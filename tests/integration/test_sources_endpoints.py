@@ -87,9 +87,9 @@ def test_get_contradiction_sources(client, db):
 @patch("app.services.s3_storage_service.s3_storage_service.get_file_content")
 def test_download_file(mock_s3_get_content, client, db, monkeypatch):
     """Test downloading a file"""
-    # Patch STORAGE_TYPE to s3
-    from app.api.endpoints import sources
-    monkeypatch.setattr(sources.settings, "STORAGE_TYPE", "s3")
+    # Patch STORAGE_TYPE to s3 (settings is used in sources.files)
+    from app.api.endpoints.sources import files as sources_files
+    monkeypatch.setattr(sources_files.settings, "STORAGE_TYPE", "s3")
     
     headers = get_auth_headers(client, "downloadfile@example.com")
     

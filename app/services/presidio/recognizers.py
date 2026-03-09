@@ -29,9 +29,11 @@ TimeRecognizer = PatternRecognizer(
 hospital_patterns = [
     Pattern(
         "Hospital",
-        r"\b(?:[A-Z][a-z.]+(?:['’\u2018\u2019]s?)?[ \t]+){1,5}"
+        r"\b(?:[A-Z][A-Za-z.&-]+(?:['’\u2018\u2019]s?)?[ \t]+){1,5}"
         r"(?:Hospital|Clinic|Medical Center|Health Center|Health System|"
-        r"Medical Group|Diagnostic Laboratory|Recovery Center|Pharmacy)\b",
+        r"Medical Group|Diagnostic Laboratory|Recovery Center|Rehabilitation Center|"
+        r"Trauma Center|Institute|Pharmacy)\b"
+        r"(?:[ \t]+(?:INC|LLC|Corp\.?|Corporation|Ltd\.?))?",
         0.95
     ),
     Pattern("Healthcare Org", r"\b[A-Z][a-z]+\s+Healthcare\b", 0.95),
@@ -40,7 +42,8 @@ hospital_patterns = [
 HospitalRecognizer = PatternRecognizer(
     supported_entity="HOSPITAL",
     patterns=hospital_patterns,
-    global_regex_flags=re.MULTILINE | re.DOTALL,
+    context=["hospital", "clinic", "center", "medical", "facility", "trauma", "institute"],
+    global_regex_flags=re.MULTILINE,
     name="Hospital_Recognizer"
 )
 
