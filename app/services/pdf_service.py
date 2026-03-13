@@ -32,9 +32,9 @@ def _run_ocr_for_page(
     actual_path: str,
     page_number: int,
     engine_hint: Optional[str] = None,
-) -> Optional[Tuple[str, List[Dict], float, str]]:
+) -> Optional[Tuple[str, List[Dict], float, str, Dict[str, Any]]]:
     """
-    Run OCR on one PDF page. Returns (page_text, text_segments, page_confidence, engine_used)
+    Run OCR on one PDF page. Returns (page_text, text_segments, page_confidence, engine_used, hybrid_stats)
     or None if OCR is disabled or fails. text_segments are in PDF-space (same shape as pdfplumber).
     engine_hint: optional engine id (e.g. tesseract, ppstructure) for lab/testing.
     """
@@ -63,7 +63,7 @@ def _run_ocr_for_page(
         pil_image, page_width_pt, page_height_pt = rasterize_pdf_page(actual_path, page_number)
         timeout = getattr(settings, "OCR_SERVICE_TIMEOUT", 120) or 120
         _ocr_start = time.perf_counter()
-        page_text, raw_segments, page_confidence, engine_used, w_px, h_px = ocr_process_page(
+        page_text, raw_segments, page_confidence, engine_used, w_px, h_px, hybrid_stats = ocr_process_page(
             pil_image, page_number, service_url, timeout_seconds=float(timeout), engine_hint=engine_hint
         )
         _ocr_elapsed_ms = (time.perf_counter() - _ocr_start) * 1000
@@ -85,7 +85,7 @@ def _run_ocr_for_page(
         # #region agent log
         _debug_log("OCR success", {"page_number": page_number, "segment_count": len(text_segments), "engine": engine_used}, "A")
         # #endregion
-        return (page_text, text_segments, page_confidence, engine_used or "ocr_service")
+        return (page_text, text_segments, page_confidence, engine_used or "ocr_service", hybrid_stats)
     except Exception as e:
         # #region agent log
         _debug_log("OCR exception", {"page_number": page_number, "error": str(e)}, "A")
@@ -547,12 +547,13 @@ class PDFService:
                                 _debug_log("ocr_result for page", {"page_num": page_num, "is_none": ocr_result is None, "segment_count": len(ocr_result[1]) if ocr_result else 0}, "A")
                                 # #endregion
                                 if ocr_result is not None:
-                                    cleaned_text, text_segments, page_conf, engine_name = ocr_result
+                                    cleaned_text, text_segments, page_conf, engine_name, hybrid_stats = ocr_result
                                     result["ocr_pages"].append(page_num)
                                     result["extraction_method"] = "mixed"
                                     page_confidences.append(page_conf)
                                     ocr_engine_used = engine_name
                                 else:
+                                    hybrid_stats = {}
                                     # Keep native confidence when text is present but OCR was only
                                     # attempted due to missing/weak segment extraction.
                                     if len(cleaned_text.strip()) >= 50:
@@ -560,11 +561,14 @@ class PDFService:
                                     else:
                                         page_confidences.append(0.0)
                             else:
+                                hybrid_stats = {}
                                 page_confidences.append(1.0)
                         except Exception as e:
                             logger.debug("OCR check failed for page %s: %s", page_num, e)
+                            hybrid_stats = {}
                             page_confidences.append(1.0)
                     else:
+                        hybrid_stats = {}
                         if len(cleaned_text.strip()) < 50:
                             result["ocr_pages"].append(page_num)
                             result["extraction_method"] = "mixed"
@@ -572,10 +576,12 @@ class PDFService:
 
                     result["pages"].append({
                         "page_number": page_num,
+                        "classification": "ocr" if page_num in result["ocr_pages"] else "native",
                         "text": cleaned_text,
                         "char_count": len(cleaned_text),
                         "text_segments": text_segments,
                         "char_coordinates": char_coordinates,
+                        "hybrid_stats": hybrid_stats,
                     })
                     result["text"] += f"\n\n--- Page {page_num} ---\n\n{cleaned_text}"
 
