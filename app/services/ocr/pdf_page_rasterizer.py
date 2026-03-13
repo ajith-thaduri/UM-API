@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 def rasterize_pdf_page(
     pdf_path: str,
     page_number: int,
-    dpi: int = 200,
+    dpi: int = 300,
 ) -> Tuple[Any, float, float]:
     """
     Render one PDF page to a PIL Image and return PDF page dimensions in points.
