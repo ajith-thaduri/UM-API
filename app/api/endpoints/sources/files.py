@@ -9,9 +9,10 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.db.session import get_db
-from app.db.dependencies import get_case_repository, get_case_file_repository
+from app.db.dependencies import get_case_repository, get_case_file_repository, get_extraction_repository
 from app.repositories.case_repository import CaseRepository
 from app.repositories.case_file_repository import CaseFileRepository
+from app.repositories.extraction_repository import ExtractionRepository
 from app.services.pdf_service import pdf_service
 
 logger = logging.getLogger(__name__)
@@ -27,8 +28,9 @@ async def get_file_page(
     db: Session = Depends(get_db),
     case_repository: CaseRepository = Depends(get_case_repository),
     case_file_repository: CaseFileRepository = Depends(get_case_file_repository),
+    extraction_repository: ExtractionRepository = Depends(get_extraction_repository),
 ):
-    """Get text for specific page of a file."""
+    """Get text for specific page of a file. Prefers stored page text (OCR-backed when applicable)."""
     case = case_repository.get_by_id(db, case_id)
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
@@ -37,12 +39,20 @@ async def get_file_page(
     if not case_file:
         raise HTTPException(status_code=404, detail="File not found")
 
-    pdf_result = pdf_service.extract_text_from_pdf(case_file.file_path)
     page_text = ""
-    for page_data in pdf_result.get("pages", []):
-        if page_data.get("page_number") == page:
-            page_text = page_data.get("text", "")
-            break
+    extraction = extraction_repository.get_by_case_id(db, case_id)
+    if extraction and extraction.source_mapping:
+        fpm = extraction.source_mapping.get("file_page_mapping") or {}
+        page_map = fpm.get(file_id) or fpm.get(str(case_file.id))
+        if isinstance(page_map, dict):
+            page_text = page_map.get(page) or page_map.get(str(page)) or ""
+
+    if not page_text:
+        pdf_result = pdf_service.extract_text_from_pdf(case_file.file_path)
+        for page_data in pdf_result.get("pages", []):
+            if page_data.get("page_number") == page:
+                page_text = page_data.get("text", "")
+                break
 
     return {
         "file_id": file_id,

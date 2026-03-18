@@ -189,6 +189,24 @@ async def get_timeline_source(
             "chunk": chunk_data,
         }
 
+        # OCR provenance for viewer
+        if extraction and getattr(extraction, "source_mapping", None):
+            ocr_meta_map = extraction.source_mapping.get("ocr_metadata") or {}
+            fid = source_info.get("file_id")
+            ocr_meta = ocr_meta_map.get(str(fid)) or ocr_meta_map.get(fid)
+            if ocr_meta and (source_info.get("page") in ocr_meta.get("ocr_pages", [])):
+                source_info["bbox_source"] = "ocr"
+                source_info["page_extraction_method"] = "ocr"
+                source_info["ocr_confidence"] = ocr_meta.get("document_confidence")
+            else:
+                source_info["bbox_source"] = "native_pdf"
+                source_info["page_extraction_method"] = "native"
+                source_info["ocr_confidence"] = None
+        else:
+            source_info["bbox_source"] = "native_pdf"
+            source_info["page_extraction_method"] = "native"
+            source_info["ocr_confidence"] = None
+
         try:
             from app.services.analytics_service import AnalyticsService
             analytics_service = AnalyticsService()
@@ -262,6 +280,18 @@ async def get_timeline_source(
                 "bbox": (event.get("details") or {}).get("bbox"),
                 "chunk": None,
             }
+            # OCR provenance (fallback path)
+            source_mapping = extraction.source_mapping or {}
+            ocr_meta_map = source_mapping.get("ocr_metadata") or {}
+            ocr_meta = ocr_meta_map.get(str(file_id)) or ocr_meta_map.get(file_id)
+            if ocr_meta and (page_num in ocr_meta.get("ocr_pages", [])):
+                source_info["bbox_source"] = "ocr"
+                source_info["page_extraction_method"] = "ocr"
+                source_info["ocr_confidence"] = ocr_meta.get("document_confidence")
+            else:
+                source_info["bbox_source"] = "native_pdf"
+                source_info["page_extraction_method"] = "native"
+                source_info["ocr_confidence"] = None
 
             timeline_lab_resolution = resolve_timeline_lab_result_source(
                 db=db,
@@ -290,5 +320,23 @@ async def get_timeline_source(
             status_code=404,
             detail=f"Source details not available for timeline event {event_id}",
         )
+
+    # Ensure OCR fields present when not set (e.g. entity_source path already set above)
+    if "bbox_source" not in source_info and extraction and getattr(extraction, "source_mapping", None):
+        ocr_meta_map = extraction.source_mapping.get("ocr_metadata") or {}
+        fid = source_info.get("file_id")
+        ocr_meta = ocr_meta_map.get(str(fid)) or ocr_meta_map.get(fid)
+        if ocr_meta and (source_info.get("page") in ocr_meta.get("ocr_pages", [])):
+            source_info["bbox_source"] = "ocr"
+            source_info["page_extraction_method"] = "ocr"
+            source_info["ocr_confidence"] = ocr_meta.get("document_confidence")
+        else:
+            source_info["bbox_source"] = "native_pdf"
+            source_info["page_extraction_method"] = "native"
+            source_info["ocr_confidence"] = None
+    elif "bbox_source" not in source_info:
+        source_info["bbox_source"] = "native_pdf"
+        source_info["page_extraction_method"] = "native"
+        source_info["ocr_confidence"] = None
 
     return {"item": item or {}, "source": source_info}

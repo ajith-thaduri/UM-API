@@ -14,9 +14,14 @@ psycopg2-binary==2.9.10
 # File Processing
 PyPDF2==3.0.1
 pdfplumber==0.11.0
+# pdf2image needs system poppler: macOS: brew install poppler
 pdf2image==1.17.0
 pytesseract==0.3.13
 Pillow==11.0.0
+# OCR preprocessing (deskew, denoise, contrast)
+opencv-python-headless>=4.8.0
+# OCR layout detection (optional; set OCR_LAYOUT_ENABLED=True)
+layoutparser>=0.3.4
 reportlab==4.0.9
 fpdf2>=2.7.0
 markdown-it-py>=3.0.0

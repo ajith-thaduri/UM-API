@@ -189,6 +189,44 @@ def test_extract_text_with_coordinates(pdf_service):
         assert mock_open_pdf.called
 
 
+def test_extract_text_with_coordinates_builds_segments_from_chars(pdf_service):
+    """Native text with char boxes but no word boxes should not degrade confidence."""
+    mock_pdf = MagicMock()
+    mock_page = MagicMock()
+    mock_page.extract_text.return_value = "This is native text content. " * 5
+    mock_page.extract_words.return_value = []
+    mock_page.chars = [
+        {"text": "H", "x0": 10, "top": 20, "x1": 14, "bottom": 30},
+        {"text": "e", "x0": 14, "top": 20, "x1": 18, "bottom": 30},
+        {"text": "l", "x0": 18, "top": 20, "x1": 20, "bottom": 30},
+        {"text": "l", "x0": 20, "top": 20, "x1": 22, "bottom": 30},
+        {"text": "o", "x0": 22, "top": 20, "x1": 27, "bottom": 30},
+        {"text": " ", "x0": 27, "top": 20, "x1": 29, "bottom": 30},
+        {"text": "w", "x0": 29, "top": 20, "x1": 35, "bottom": 30},
+        {"text": "o", "x0": 35, "top": 20, "x1": 40, "bottom": 30},
+        {"text": "r", "x0": 40, "top": 20, "x1": 44, "bottom": 30},
+        {"text": "l", "x0": 44, "top": 20, "x1": 46, "bottom": 30},
+        {"text": "d", "x0": 46, "top": 20, "x1": 51, "bottom": 30},
+    ]
+    mock_pdf.pages = [mock_page]
+    mock_pdf.__enter__ = MagicMock(return_value=mock_pdf)
+    mock_pdf.__exit__ = MagicMock(return_value=None)
+
+    with patch("app.services.pdf_service.settings.STORAGE_TYPE", "local"), \
+         patch("app.services.pdf_service.pdfplumber.open", return_value=mock_pdf), \
+         patch("os.path.exists", return_value=True), \
+         patch("os.unlink"):
+
+        result = pdf_service.extract_text_with_coordinates("/path/to/file.pdf")
+
+        assert result["page_count"] == 1
+        assert result["document_confidence"] == 1.0
+        assert result["ocr_pages"] == []
+        assert len(result["pages"][0]["text_segments"]) == 2
+        assert result["pages"][0]["text_segments"][0]["text"] == "Hello"
+        assert result["pages"][0]["text_segments"][1]["text"] == "world"
+
+
 def test_extract_text_with_coordinates_s3(pdf_service):
     """Test extracting text with coordinates from S3"""
     mock_pdf = MagicMock()

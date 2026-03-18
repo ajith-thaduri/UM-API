@@ -254,6 +254,7 @@ class CaseProcessor:
                 all_extracted_text = []
                 file_page_mapping = {}  # Maps file_id -> {page_num -> text}
                 file_page_bbox_mapping = {}  # Maps file_id -> {page_num -> text_segments with bbox}
+                ocr_metadata = {}  # Per-file OCR: file_id -> {document_confidence, ocr_pages, ocr_engine_used}
                 combined_text_parts = []
                 
                 successful_extractions = 0
@@ -307,6 +308,12 @@ class CaseProcessor:
                                 f"\n\n--- File: {file_info['file_name']} | Page {page_num} ---\n\n{page_text}"
                             )
                         
+                        # Persist OCR metadata for source viewer and summary gating
+                        ocr_metadata[file_info["id"]] = {
+                            "document_confidence": pdf_result.get("document_confidence", 1.0),
+                            "ocr_pages": pdf_result.get("ocr_pages", []),
+                            "ocr_engine_used": pdf_result.get("ocr_engine_used"),
+                        }
                         all_extracted_text.append(pdf_result["text"])
                         successful_extractions += 1
                 
@@ -327,6 +334,15 @@ class CaseProcessor:
                 # Log warnings for partial failures
                 if failed_files:
                     logger.warning(f"Successfully extracted {successful_extractions} of {len(case_files)} files. Failed: {', '.join(failed_files)}")
+
+                # Document-level OCR confidence (for summary gating)
+                document_confidence = (
+                    min(
+                        (m.get("document_confidence", 1.0) for m in ocr_metadata.values()),
+                        default=1.0,
+                    )
+                    if ocr_metadata else 1.0
+                )
 
                 # Combine all text for LLM processing
                 extracted_text = "\n\n".join(all_extracted_text)
@@ -632,46 +648,73 @@ class CaseProcessor:
                 step_time = time.time() - step_start
                 logger.info(f"[TIMING] Step 6 (Contradictions) completed in {step_time:.2f}s for case {case_id}")
 
-                # Step 7: Generate comprehensive summary (async)
+                # Step 7: Generate comprehensive summary (async), gated by OCR confidence
                 step_start = time.time()
-                logger.info(f"[TIMING] Starting comprehensive summary generation for case {case_id}")
-                
-                # Collect all chunk texts for Tier 2 (will be de-identified before sending to Claude)
+                from app.services.ocr import summary_eligible
+                summary_eligible_flag, summary_eligibility_message = summary_eligible(document_confidence)
                 all_chunk_texts = [chunk.chunk_text for chunk in chunk_mapping.values()] if chunk_mapping else []
-                logger.info(f"[TIMING] Passing {len(all_chunk_texts)} document chunks to summary service for case {case_id}")
-                
-                summary = await summary_service.generate_summary(
-                    clinical_data,
-                    timeline,
-                    contradictions,
-                    case.patient_name,
-                    case.case_number,
-                    db=db,
-                    case_id=case_id,
-                    user_id=user_id,
-                    document_chunks=all_chunk_texts
-                )
-                step_time = time.time() - step_start
-                logger.info(f"[TIMING] Step 7 (Comprehensive Summary) completed in {step_time:.2f}s for case {case_id}")
+                if not summary_eligible_flag:
+                    summary_eligibility_status = "gated"
+                    logger.warning(
+                        f"[OCR] Summary gated for case {case_id}: low document confidence ({document_confidence:.2f}). {summary_eligibility_message}"
+                    )
+                    summary = summary_service._generate_mock_summary(
+                        clinical_data,
+                        timeline,
+                        contradictions,
+                        case.patient_name,
+                        case.case_number,
+                    )
+                    executive_summary = summary_service._generate_mock_executive_summary(
+                        clinical_data,
+                        timeline,
+                        contradictions,
+                        case.patient_name,
+                        case.case_number,
+                    )
+                    step_time = time.time() - step_start
+                    logger.info(f"[TIMING] Step 7 (Summary gated, mock used) completed in {step_time:.2f}s for case {case_id}")
+                else:
+                    summary_eligibility_status = "eligible"
+                    summary_eligibility_message = "OK"
+                    logger.info(f"[TIMING] Starting comprehensive summary generation for case {case_id}")
+                    logger.info(f"[TIMING] Passing {len(all_chunk_texts)} document chunks to summary service for case {case_id}")
+                    summary = await summary_service.generate_summary(
+                        clinical_data,
+                        timeline,
+                        contradictions,
+                        case.patient_name,
+                        case.case_number,
+                        db=db,
+                        case_id=case_id,
+                        user_id=user_id,
+                        document_chunks=all_chunk_texts
+                    )
+                    step_time = time.time() - step_start
+                    logger.info(f"[TIMING] Step 7 (Comprehensive Summary) completed in {step_time:.2f}s for case {case_id}")
 
-                # Step 7.5: Generate executive summary (async)
+                # Step 7.5: Generate executive summary (async), same gating
                 step_start = time.time()
-                logger.info(f"[TIMING] Starting executive summary generation for case {case_id}")
-                executive_summary = await summary_service.generate_executive_summary(
-                    clinical_data,
-                    timeline,
-                    contradictions,
-                    case.patient_name,
-                    case.case_number,
-                    db=db,
-                    case_id=case_id,
-                    user_id=user_id,
-                    document_chunks=all_chunk_texts
-                )
-                step_time = time.time() - step_start
-                logger.info(f"[TIMING] Step 7.5 (Executive Summary) completed in {step_time:.2f}s for case {case_id}")
+                if not summary_eligible_flag:
+                    step_time = time.time() - step_start
+                    logger.info(f"[TIMING] Step 7.5 (Executive summary gated, mock already used) completed in {step_time:.2f}s for case {case_id}")
+                else:
+                    logger.info(f"[TIMING] Starting executive summary generation for case {case_id}")
+                    executive_summary = await summary_service.generate_executive_summary(
+                        clinical_data,
+                        timeline,
+                        contradictions,
+                        case.patient_name,
+                        case.case_number,
+                        db=db,
+                        case_id=case_id,
+                        user_id=user_id,
+                        document_chunks=all_chunk_texts
+                    )
+                    step_time = time.time() - step_start
+                    logger.info(f"[TIMING] Step 7.5 (Executive Summary) completed in {step_time:.2f}s for case {case_id}")
 
-                # Step 8: Prepare source mapping for storage
+                # Step 8: Prepare source mapping for storage (include OCR metadata and summary gating)
                 source_mapping = {
                     "file_page_mapping": file_page_mapping,
                     "files": [
@@ -684,7 +727,11 @@ class CaseProcessor:
                     ],
                     "rag_enabled": should_use_rag,
                     "chunk_count": len(chunk_mapping),
-                    "extraction_sources": extraction_sources
+                    "extraction_sources": extraction_sources,
+                    "document_confidence": document_confidence,
+                    "ocr_metadata": ocr_metadata,
+                    "summary_eligibility_status": summary_eligibility_status,
+                    "summary_eligibility_message": summary_eligibility_message,
                 }
 
                 # Step 9: Add patient demographics (DOB) to extracted_data for PDF generation

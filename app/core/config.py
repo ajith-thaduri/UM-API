@@ -153,8 +153,31 @@ class Settings(BaseSettings):
     SFTP_POLL_INTERVAL: int = 60  # Poll interval in seconds
     CHUNK_OVERLAP: int = 100  # Overlap in tokens between chunks (token-based)
 
-    # OCR Configuration
-    OCR_ENGINE: str = "tesseract"  # tesseract, azure, textract
+    # OCR: use standalone OCR service (separate repo/instance)
+    OCR_SERVICE_URL: str = ""  # e.g. http://ocr-service:8000; required for OCR when set
+    OCR_SERVICE_TIMEOUT: int = 120  # seconds
+    OCR_ENABLED: bool = True
+    OCR_PRIMARY_ENGINE: str = "tesseract"  # legacy; engine choice is in OCR service
+    OCR_FALLBACK_ENGINE: str = "tesseract"
+    OCR_PAGE_TRIGGER_MODE: str = "auto"  # auto = OCR when native text too short
+    OCR_MIN_PAGE_CONFIDENCE: float = 0.5  # Per-page confidence threshold
+    OCR_MIN_DOCUMENT_CONFIDENCE: float = 0.5  # Document-level for gating
+    OCR_SUMMARY_GATE_ENABLED: bool = True  # Block/degrade summary when doc confidence below threshold
+    OCR_ENGINE: str = "tesseract"  # Legacy; prefer OCR_PRIMARY_ENGINE
+    # Preprocessing (deskew, denoise, contrast, binarize, morphology)
+    OCR_PREPROCESS_ENABLED: bool = True
+    OCR_PREPROCESS_BINARIZE: bool = False  # Optional; can hurt some documents
+    OCR_PREPROCESS_MORPHOLOGY: bool = False  # MORPH_CLOSE after binarize; enable only for broken/fax scans
+    OCR_PREPROCESS_BINARIZE_BLOCK_SIZE: int = 11  # 11 preserves thin text; 15 can erode characters
+    OCR_PREPROCESS_DENOISE_MEDIAN_FIRST: bool = False  # medianBlur can destroy thin strokes; fastNlMeans only by default
+    # LayoutParser for layout detection and segment reordering
+    OCR_LAYOUT_ENABLED: bool = False  # Set True when layoutparser is installed and desired
+    # Post-correction rules path (JSON); empty = use built-in defaults
+    OCR_CORRECTIONS_PATH: str = ""  # e.g. config/ocr_corrections.json
+    # PP-Structure: local (PaddleOCR in-process) or remote (HTTP OCR service)
+    PPSTRUCTURE_MODE: str = "local"  # "local" | "remote"
+    PPSTRUCTURE_SERVICE_URL: str = ""  # e.g. https://ocr-service.example.com
+    PPSTRUCTURE_SERVICE_TIMEOUT: int = 120  # seconds for remote request
 
     # Security
     SECRET_KEY: str = "your-secret-key-change-this-in-production"

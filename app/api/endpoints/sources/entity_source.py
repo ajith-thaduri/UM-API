@@ -508,6 +508,24 @@ async def get_entity_source(
             "full_text": entity_source.full_text,
             "term": highlight_term if highlight_term else None,
         }
+        # OCR provenance for viewer (from extraction.source_mapping)
+        extraction_for_ocr = extraction_repository.get_by_case_id(db, case_id)
+        if extraction_for_ocr and extraction_for_ocr.source_mapping:
+            ocr_meta_map = extraction_for_ocr.source_mapping.get("ocr_metadata") or {}
+            fid = source_info.get("file_id")
+            ocr_meta = ocr_meta_map.get(str(fid)) or ocr_meta_map.get(fid)
+            if ocr_meta and (source_info.get("page") in ocr_meta.get("ocr_pages", [])):
+                source_info["bbox_source"] = "ocr"
+                source_info["page_extraction_method"] = "ocr"
+                source_info["ocr_confidence"] = ocr_meta.get("document_confidence")
+            else:
+                source_info["bbox_source"] = "native_pdf"
+                source_info["page_extraction_method"] = "native"
+                source_info["ocr_confidence"] = None
+        else:
+            source_info["bbox_source"] = "native_pdf"
+            source_info["page_extraction_method"] = "native"
+            source_info["ocr_confidence"] = None
 
         # CRITICAL: Add chunk data separately to ensure it's included
         # ALWAYS include chunk field (even if None) so frontend knows the state
@@ -605,6 +623,9 @@ async def get_entity_source(
                 "full_text": source_info.get("full_text"),
                 "term": source_info.get("term"),
                 "chunk": chunk_data,  # EXPLICITLY include chunk field
+                "bbox_source": source_info.get("bbox_source"),
+                "page_extraction_method": source_info.get("page_extraction_method"),
+                "ocr_confidence": source_info.get("ocr_confidence"),
             },
         }
         print(
@@ -1059,6 +1080,25 @@ async def get_entity_source(
             entity_type=entity_type,
         )
         logger.debug(f"[EVIDENCE] Extracted highlight term: {source_info.get('term')}")
+
+    # OCR provenance for viewer (fallback path)
+    fid = source_info.get("file_id")
+    page_num = source_info.get("page")
+    if fid is not None and page_num is not None and source_mapping:
+        ocr_meta_map = source_mapping.get("ocr_metadata") or {}
+        ocr_meta = ocr_meta_map.get(str(fid)) or ocr_meta_map.get(fid)
+        if ocr_meta and (page_num in ocr_meta.get("ocr_pages", [])):
+            source_info["bbox_source"] = "ocr"
+            source_info["page_extraction_method"] = "ocr"
+            source_info["ocr_confidence"] = ocr_meta.get("document_confidence")
+        else:
+            source_info["bbox_source"] = "native_pdf"
+            source_info["page_extraction_method"] = "native"
+            source_info["ocr_confidence"] = None
+    else:
+        source_info["bbox_source"] = "native_pdf"
+        source_info["page_extraction_method"] = "native"
+        source_info["ocr_confidence"] = None
 
     logger.info(
         f"[EVIDENCE] Returning source_info (fallback path): file_id={source_info.get('file_id')}, file_name={source_info.get('file_name')}, page={source_info.get('page')}, has_bbox={source_info.get('bbox') is not None}, has_term={source_info.get('term') is not None}"
