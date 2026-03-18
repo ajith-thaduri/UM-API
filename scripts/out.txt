@@ -1,0 +1,4 @@
+Date: 13/05/2024 | Norm: None | Strict DD: True | Valid MM: False | Shifted Text: 'Date is 13/05/2024'
+Date: 05/13/2024 | Norm: 05/13/2024 | Strict DD: False | Valid MM: True | Shifted Text: 'Date is 05/23/2024'
+Date: 12/05/2024 | Norm: 12/05/2024 | Strict DD: False | Valid MM: True | Shifted Text: 'Date is 12/15/2024'
+Date: 20/01/2025 | Norm: None | Strict DD: True | Valid MM: False | Shifted Text: 'Date is 20/01/2025'
