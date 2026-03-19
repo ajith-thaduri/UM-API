@@ -149,3 +149,44 @@ def get_date_from_dict(item: dict, keys: Optional[list] = None) -> Optional[str]
     return None
 
 
+
+def is_valid_mm_dd_yyyy(date_str: str) -> bool:
+    """
+    Check if a string is a valid date in MM/DD/YYYY format.
+    Expects 2-digit month, 2-digit day, and 4-digit year.
+    """
+    if not date_str or not isinstance(date_str, str):
+        return False
+    # Strict regex for MM/DD/YYYY to match transformer output
+    if not re.match(r"^\d{1,2}/\d{1,2}/\d{4}$", date_str):
+        return False
+    try:
+        datetime.strptime(date_str, "%m/%d/%Y")
+        return True
+    except ValueError:
+        return False
+
+
+def is_strict_dd_mm_yyyy(date_str: str) -> bool:
+    """
+    Check if a string is unambiguously DD/MM/YYYY (where DD > 12).
+    If DD <= 12, it is ambiguous and we treat it as MM/DD/YYYY by default.
+    """
+    if not date_str or not isinstance(date_str, str):
+        return False
+    
+    match = re.match(r"^(\d{1,2})/(\d{1,2})/(\d{4})$", date_str)
+    if not match:
+        return False
+        
+    day, month, year = map(int, match.groups())
+    
+    # If the first part is > 12, it MUST be the day (DD/MM/YYYY)
+    if day > 12 and month <= 12:
+        try:
+            datetime(year, month, day)
+            return True
+        except ValueError:
+            return False
+            
+    return False

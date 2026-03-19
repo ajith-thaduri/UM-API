@@ -14,6 +14,7 @@ from typing import Any, List
 from app.utils.safe_logger import get_safe_logger
 from .constants import (
     NER_EXACT_BLOCKLIST, NER_PHRASE_BLOCKLIST, FIELD_LABEL_STOP_WORDS,
+    MEDICAL_WORD_SET,
     _PHONE_REGEX, _STREET_REGEX, _CLINICAL_CONTEXT_WORDS,
     _MAX_ENTITY_SPAN, _MIN_ENTITY_CHARS,
     _SUFFIX_ONLY_REGEX, _CREDENTIALS_TRIM_REGEX, _HONORIFIC_PREFIX_REGEX,
@@ -179,6 +180,14 @@ def sanitize_ner_results(results: List[Any], text: str) -> List[Any]:
             words = set(re.findall(r"\w+", span_text.lower()))
             if words and words.issubset(FIELD_LABEL_STOP_WORDS):
                 safe_logger.debug(f"Dropping PERSON '{span_text}' — looks like a field label")
+                continue
+
+        # ── 12. Clinical content gate ──────────────────────────────────────────────
+        # PERSON/ORG/LOCATION spans containing any medical word are clinical content, not PHI.
+        if entity_type in ("PATIENT_FULL_NAME", "PERSON", "ORGANIZATION", "LOCATION", "CITY", "CITY_FACILITY"):
+            span_words = set(re.findall(r"\b[a-z]+\b", span_text.lower()))
+            if span_words & MEDICAL_WORD_SET:
+                safe_logger.debug(f"Dropping {entity_type} '{span_text}' — clinical word")
                 continue
 
         sanitized.append(res)

@@ -99,6 +99,33 @@ def normalize_entity_type(entity_type: str) -> str:
     return ENTITY_TYPE_NORMALIZATION.get(entity_type, entity_type)
 
 
+# ── Clinical Content Protection ──────────────────────────────────────────────
+# Single clinical words. If a detected PERSON/ORG span contains any of these,
+# it is clinical content, not PHI, and must not be redacted.
+MEDICAL_WORD_SET: set = {
+    # Diseases
+    "diabetes", "mellitus", "hypertension", "failure", "syndrome", "disease",
+    "disorder", "infection", "cancer", "tumor", "carcinoma", "lymphoma",
+    "neuropathy", "retinopathy", "nephropathy", "osteoarthritis", "obesity",
+    "asthma", "arthritic", "copd", "emphysema", "bronchitis", "md",
+    # Vitals / Labs
+    "vitals", "pressure", "saturation", "rate", "count", "panel", "analysis",
+    "culture", "function", "glucose", "cholesterol", "creatinine", "albumin",
+    "hemoglobin", "platelet", "sodium", "potassium", "sedimentation",
+    "bilirubin", "triglycerides", "ferritin", "urea", "lipid", "metabolic",
+    "inflammatory", "labs", "laboratory", "specimen", "sample",
+    # Medications (common)
+    "medications", "medicine", "medication", "acetaminophen", "metformin", "albuterol",
+    "theophylline", "fluticasone", "lisinopril", "atorvastatin", "aspirin",
+    "insulin", "warfarin", "amoxicillin", "ibuprofen", "omeprazole",
+    "vaccination", "influenza", "dosage", "refill", "refills", "mg", "ml",
+    # Anatomy / procedures
+    "pulmonary", "respiratory", "arterial", "venous", "cardiac", "renal",
+    "hepatic", "thyroid", "peripheral", "conduction", "surgery", "imaging",
+    "radiology", "pathology", "consultation", "assessment", "evaluation",
+}
+
+
 # ── NER False-Positive Block-lists ────────────────────────────────────────────
 NER_EXACT_BLOCKLIST: set = {
     "patient name", "patient", "admission date", "discharge date",
@@ -162,8 +189,60 @@ NER_EXACT_BLOCKLIST: set = {
     "discharge instructions", "follow-up", "primary vehicle",
     "additional vehicle", "additional pii edge cases",
     "repeated phi stress section", "chief complaint",
-    "physical examination", "medications", "allergies",
+    "physical examination", "allergies",
     "social history", "case metadata",
+    "address information", "previous address", "temporary residence", "patient home",
+    "fax numbers", "email addresses", "personal email", "corporate email", "portal email",
+    "record number", "radiology study", "clinical trial",
+    "financial identifiers", "plan beneficiary", "insurance policy", "insurance claim",
+    "identification documents", "vehicle registration", "internet identifiers", "mobile device",
+    "patient portals", "insurance portal", "telehealth session",
+    "prescription portal", "retina scan", "face recognition", "voice recognition",
+    "patient photograph", "image file", "dates related", "surgery date",
+    "employer information", "parking garage", "nurse name",
+    "doctor information",
+    "doctor notes", "doctor notes past", "exercise habits", "eye exam", "fatty acids",
+    "follow up",
+    "initial osteoarthritis", "last done",
+    "lifestyle data", "lifestyle information", "medical conditions",
+    "medical data", "medical sections", "medical terms", "medical tests",
+    "new concerns", "new or", "occasionally diet",
+    "patient lifestyle", "patient summary",
+    "routine check",
+    "section headings", "smoking status", "status on",
+    "subjective observations", "table of", "tesla model", "midnight silver", "patient account number",
+    "device identifier", "website mentioned", "location information", "during treatment",
+    "encounter timeline", "admission time", "initial emergency", "department evaluation",
+    "radiology imaging", "cardiology consultation", "procedure date", "staff information",
+    "consulting cardiologist", "nurse supervisor", "payment authorization",
+    "billing reference", "diagnostic identifiers", "radiology image",
+    "scan file", "pathology report", "implant identifiers", "cardiac implant",
+    "device serial", "device tracking", "digital identifiers", "electronic prescription",
+    "patient monitoring device", "additional narrative",
+    "recorded date", "doctor name", "doctor unique", "doctor information doctor",
+    "past hospital", "doctor notes past", "date of", "coordinator for", "encounter summary",
+    "start service", "encounter participant", "appointment confirmation", "confirmed on",
+    "paitnet summary", "visit current", "visits date",
+    "document / section text", "diagnostic form",
+    "electronically signed", "insurance agent", "state id", "employer employee id",
+    "patient profile photo file name", "east wing", "industrial parkway", "number used",
+    "employer information employer", "accession number", "network identifiers",
+    "vehicle license", "is his wife", "employee id at the company", "login session",
+    "his social", "security number", "his bank", "her social", "her bank",
+    "is her husband", "the pharmacy", "with group", "details were provided",
+    "biometric identifier", "vehicle number", "patient photo", "patient information",
+    "phone numbers", "company name", "commerce plaza", "insurance contact", "heart rate",
+    "blood sample", "scan technician", "facial recognition", "patient medical record",
+    "admission details", "clinical notes", "device information", "license number",
+    "biometric information", "web information", "location data", "family members",
+    "primary care", "alias used in prior records", "jane doe at", "employer id", "vehicle plate",
+    # --- New blocked terms ---
+    "doctor notes subjective","Doctor Notes Subjective","Doctor Information Doctor",
+    "doctor notes michael", "doctor notes robert",
+    "doctor notes phyllis",
+    "dosage frequency", "twice daily", "once daily",
+    "general wellness",
+    "employer employee",
 }
 
 NER_PHRASE_BLOCKLIST: set = {
@@ -176,6 +255,8 @@ NER_PHRASE_BLOCKLIST: set = {
     "county", "patient portal", "employer name", "biometric authentication token",
     "discharge instructions", "midwest diagnostic", "senior software engineer",
     "senior software", "alt format", "mac alt",
+    "diet", "symptoms", "vaccination",
+    "tesla", "midnight silver",
 }
 
 # ── Field-label stop-words (Rule 11 in sanitizer) ─────────────────────────────
@@ -195,10 +276,16 @@ FIELD_LABEL_STOP_WORDS: set = {
     "sample", "scan", "secondary", "security", "social", "state",
     "suite", "summary", "test", "third", "token", "unit", "url",
     "username", "vehicle", "vin", "visit", "year", "zip",
-    "additional", "alt", "bed", "beneficiary", "chief", "clinical",
+    "additional", "alt", "bed", "beneficiary", "chief",
     "complaint", "edge", "examination", "follow-up", "history",
-    "instructions", "medications", "notes", "physical", "pii",
+    "instructions", "notes", "physical", "pii",
     "repeated", "section", "stress", "type",
+    "residence", "home", "portal", "session", "recognition", "photograph",
+    "image", "related", "garage", "status", "silver", "tesla",
+    "supervisor", "technician", "authorization",
+    "reference", "serial", "tracking", "digital",
+    "electronic", "monitoring", "narrative", "treatment", "encounter",
+    "timeline", "evaluation", "procedure", "trial",
 }
 
 # ── Compiled regexes used by NER sanitizer ────────────────────────────────────

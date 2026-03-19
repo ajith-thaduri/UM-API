@@ -48,59 +48,63 @@ def replace_in_string(
 
     result = text
 
-    # ── Stage 1: Heuristic Regex Strip ───────────────────────────────────────
-    result = re.sub(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", "[[REDACTED]]", result)
-    result = re.sub(r"https?://[^\s<>\"]+|www\.[^\s<>\"]+", "[[REDACTED]]", result)
-    result = re.sub(r"(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}", "[[REDACTED]]", result)
-    # SSN
-    result = re.sub(r"\b\d{3}-\d{2}-\d{4}\b", "[[REDACTED]]", result)
-    # MAC Address
-    result = re.sub(r"\b([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b", "[[REDACTED]]", result)
-    # IPv4
-    result = re.sub(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", "[[REDACTED]]", result)
-    # Credit Cards
-    result = re.sub(r"\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b", "[[REDACTED]]", result)
-    # VIN
-    result = re.sub(r"\b[A-HJ-NPR-Z0-9]{17}\b", "[[REDACTED]]", result)
-    # Country names
-    for country in ["United States", "USA", "U.S.", "U.S.A.", "United Kingdom", "UK"]:
-        result = re.sub(r"\b" + re.escape(country) + r"\b", "[[REDACTED]]", result, flags=re.I)
-    # Vehicle plates (common format)
-    result = re.sub(r"\b[A-Z]{2}-[A-Z]{2,4}-\d{4}\b", "[[REDACTED]]", result)
-    # Passport / Driver's License (contextual)
-    result = re.sub(r"\b(?:Passport|License|DL)[:\s]*[A-Z]\d{6,9}\b", "[[REDACTED]]", result, flags=re.I)
-    # Sub-addresses
-    result = re.sub(r"\bAp(?:art)?(?:ment|t)?\.?\s*#?\s*\w{1,6}\b", "[[REDACTED]]", result, flags=re.I)
-    result = re.sub(r"\bS(?:ui)?te\.?\s*#?\s*\w{1,6}\b", "[[REDACTED]]", result, flags=re.I)
-    result = re.sub(r"\bR(?:oo)?m\.?\s*#?\s*\d{1,4}[A-Za-z]?\b", "[[REDACTED]]", result, flags=re.I)
-    result = re.sub(r"\bUnit\s*#?\s*\w{1,6}\b", "[[REDACTED]]", result, flags=re.I)
-    # City, State (full state names)
+    # ── Stage 1: Heuristic Regex Strip (HIPAA Safe Harbor only) ─────────────
+
+    # 1. Email addresses — unambiguous
+    result = re.sub(r"\b[a-zA-Z0-9._%+-]+@(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}\b", "[[REDACTED]]", result)
+
+    # 2. URLs / web addresses — unambiguous
+    result = re.sub(r"\b(?:https?://|www\.)[^\s<>\"]+\b", "[[REDACTED]]", result)
+
+    # 3. US phone numbers — must match full US phone format (10+ digits with separators)
+    #    Tightened: requires area code + 7 digit number with explicit separators
     result = re.sub(
-        rf"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){{0,2}},\s*(?:{_US_STATE_FULL})\b",
+        r"\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}\b",
         "[[REDACTED]]", result
     )
-    # Ages ≥ 90
+
+    # 4. SSN — unambiguous format
+    result = re.sub(r"\b\d{3}-\d{2}-\d{4}\b", "[[REDACTED]]", result)
+
+    # 5. MAC Address
+    result = re.sub(r"\b([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b", "[[REDACTED]]", result)
+
+    # 6. IPv4 — only redact when all 4 octets are in valid IP range (0-255)
+    def _is_valid_ipv4(m):
+        parts = m.group().split(".")
+        if all(0 <= int(p) <= 255 for p in parts):
+            return "[[REDACTED]]"
+        return m.group()
+    result = re.sub(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", _is_valid_ipv4, result)
+
+    # 7. Credit Card numbers (4 groups of 4 digits)
+    result = re.sub(r"\b\d{4}[-\s]\d{4}[-\s]\d{4}[-\s]\d{4}\b", "[[REDACTED]]", result)
+
+    # 8. Ages ≥ 90 only
     result = re.sub(r"\b(\d{1,3})\s*years?\s*old\b", _redact_age_90plus, result, flags=re.IGNORECASE)
+
 
     # ── Stage 2: Known PHI / Identity Replacement ─────────────────────────────
     replacements: List[tuple] = []
+    
+    # Only add strips that are reasonably long/specific to avoid accidental word redaction
     for s in strip_list:
-        if s and len(s) > 3:
-            replacements.append((s, "[[REDACTED]]"))
+        if s and len(str(s).strip()) > 4:
+            replacements.append((str(s).strip(), "[[REDACTED]]"))
+            
     for val, token in variant_token_map.items():
-        if val and len(val) > 2:
-            replacements.append((val, token))
+        if val and len(str(val).strip()) > 3: # Ignore variants <= 3 chars
+            replacements.append((str(val).strip(), token))
+            
     # Longest-first so overlapping strings don't partially clobber each other
     replacements.sort(key=lambda x: len(x[0]), reverse=True)
 
     for original, target in replacements:
-        if original in result:
-            if target == "[[REDACTED]]":
-                result = re.sub(re.escape(original), target, result, flags=re.IGNORECASE)
-            else:
-                result = re.sub(
-                    r"\b" + re.escape(original) + r"\b", target, result, flags=re.IGNORECASE
-                )
+        pattern = re.escape(original)
+        if target != "[[REDACTED]]":
+            pattern = r"\b" + pattern + r"\b"
+            
+        result = re.sub(pattern, target, result, flags=re.IGNORECASE)
 
     return result
 

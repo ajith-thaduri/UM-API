@@ -16,7 +16,7 @@ from app.db.session import get_db
 from app.api.endpoints.auth import get_current_user
 from app.services.presidio_deidentification_service import presidio_deidentification_service
 from app.services.date_shift_service import shift_dates_in_text, DATE_PATTERNS
-from app.utils.date_utils import normalize_date_format
+from app.utils.date_utils import normalize_date_format, is_strict_dd_mm_yyyy
 from app.models.privacy_vault import PrivacyVault
 from app.utils.safe_logger import get_safe_logger
 
@@ -64,6 +64,7 @@ class EntityResult(BaseModel):
     start: int
     end: int
     score: float
+    token: Optional[str] = None
     explanation: Optional[str] = None
 
 
@@ -83,6 +84,21 @@ class AdvancedAnalyzeResponse(BaseModel):
     stats: Dict[str, int]
     engine_info: Dict[str, Any]
     settings_used: Dict[str, Any]
+
+
+class AICorrectionRequest(BaseModel):
+    de_identified_payload: Dict[str, Any]
+    token_map: List[Dict[str, Any]]
+
+
+class AICorrectionSuggestion(BaseModel):
+    token: str
+    original: str
+    reason: str
+
+
+class AICorrectionResponse(BaseModel):
+    suggestions: List[AICorrectionSuggestion]
 
 
 # ─── Endpoints ───────────────────────────────────────────────────────────────
@@ -156,11 +172,19 @@ def analyze_text_advanced(request: AdvancedAnalyzeRequest):
             ("SUB_ADDRESS", r"\b(?:Apt\.?|Apartment|Suite|Ste\.?|Unit|Room|Rm\.?|Floor|Fl\.?|PO Box)\b\s*#?\s*[A-Za-z0-9-]{1,6}\b", 0),
             ("TIME", r"\b\d{1,2}:\d{2}\s?(?:AM|PM|am|pm)\b", 0),
             # Explicit labeled fields from the production deterministic pass
-            ("PERSON", r"\b(?:Patient(?:\s+Name)?|Name|PT):\s+([A-Z][a-z]+(?:[ \t-][A-Z][a-z]+){1,3})\b", 1),
-            ("PERSON", r"\b(?:Alias|AKA|Also known as|Goes by):\s+([A-Z][a-z]+(?:[ \t]+[A-Z][a-z]+){0,3})\b", 1),
+            # Patient name: colon required, stop at known field-label words
+            ("PERSON",
+             r"\b(?:Patient(?:\s+Name)?|Name|PT)\s*:\s*"
+             r"([A-Z][a-z]+"
+             r"(?:\s+(?!(?:Date|DOB|SSN|Phone|Email|Address|Age|Sex|MRN|NPI|Alias|AKA|Also|Goes|Employer|Username|Login|URL|ID|Insurance|Passport|License|County|ZIP|Fax|Time)\b)[A-Z][a-z]+){0,3})",
+             1),
+            ("PERSON", r"(?:,\s*)?\b(?:Alias|AKA|Also\s+known\s+as|Goes\s+by)[:\s]+([A-Za-z][a-z]+(?:\s+[A-Za-z][a-z]+){0,3})\b", 1),
             ("PERSON", r"\b(?:Emergency\s+Contact|Spouse|Relative)[:\s\n]+(?:Name:\s+)?([A-Z][a-z]+(?:[ \t-][A-Z][a-z]+){1,2})\b", 1),
             ("ORGANIZATION", r"\b(?:Employer):\s+([A-Z][A-Za-z.'-]+(?:[ \t]+[A-Z][A-Za-z.'-]+){0,3}[ \t]+(?:Corporation|Corp\.|Inc\.|LLC|Company|Logistics|Power[ \t]+Plant|Bank|Pharmacy|Group))\b", 1),
-            ("USERNAME", r"\b(?:Username|User\s*ID|Login|Portal\s*Username):\s+([a-zA-Z0-9._-]+)\b", 1),
+            # USERNAME: colon-separator e.g. "Username: johndoe@123"
+            ("USERNAME", r"\b(?:Username|User\s*ID|Login|Portal\s*Username)\s*:\s*([a-zA-Z0-9._@-]+)\b", 1),
+            # USERNAME: space-only e.g. "username johndoe@123" (no colon)
+            ("USERNAME", r"\b(?:Username|User\s*ID|Login|Portal\s*Username)\s+([a-zA-Z0-9][a-zA-Z0-9._@-]*[0-9._@-]+[a-zA-Z0-9._@-]*)\b", 1),
             ("LOCATION", r"\b(?:Country):[ \t]+([A-Z][a-z]+(?:[ \t]+[A-Z][a-z]+){0,2})\b", 1),
             ("LOCATION", r"\b(?:County):[ \t]+([A-Z][a-z]+(?:[ \t]+[A-Z][a-z]+){0,2}[ \t]+County)\b", 1),
             ("ORGANIZATION", r"\b(?:at|to|from|through|in|at|of)[ \t]+((?!(?:the|a|an)\b)(?:[A-Z][A-Za-z.&-]+(?:['’\u2018\u2019]s?)?[ \t]+){1,5}(?:Hospital|Clinic|Medical Center|Health Center|Health System|Medical Group|Diagnostic Laboratory|Recovery Center|Rehabilitation Center|Trauma Center|Institute|Pharmacy)(?:\b(?:[ \t]+(?:INC|LLC|Corp\.?|Corporation|Ltd\.?))?))\b", 1),
@@ -170,7 +194,6 @@ def analyze_text_advanced(request: AdvancedAnalyzeRequest):
             ("PHONE_NUMBER", r"\b(tel:\+?\d{7,15})\b", 1),
             ("URL", r"\b(?:URL|Website|Web|Link|Patient\s+Portal)[:\s]+((?:https?://|www[:.]?)[a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+(?:/[a-zA-Z0-9._?=&%/#~+-]*)?)\b", 1),
         ]
-        
         for entity_type, regex_pattern, group_idx in safe_harbor_heuristics:
             pattern = re.compile(regex_pattern, re.IGNORECASE)
             for match in pattern.finditer(text):
@@ -184,6 +207,21 @@ def analyze_text_advanced(request: AdvancedAnalyzeRequest):
                     "start": start, "end": end, "score": 1.5,
                     "explanation": f"Deterministic Safe Harbor: {entity_type}",
                 })
+
+        # 2c. Force strict DD/MM/YYYY dates into findings (Redacted Dates)
+        # Even if the NER misses them, we want them prominently displayed in the UI as redacted anomalies.
+        for pattern, _ in DATE_PATTERNS:
+            for match in pattern.finditer(text):
+                candidate = text[match.start():match.end()]
+                if is_strict_dd_mm_yyyy(candidate):
+                    denylist_results.append({
+                        "entity_type": "DATE_TIME",
+                        "text": candidate,
+                        "start": match.start(),
+                        "end": match.end(),
+                        "score": 1.5,
+                        "explanation": "Strict DD/MM/YYYY Date (Redacted)"
+                    })
 
         # ── Step 3: Canonicalize and Format ──
         from app.services.presidio_deidentification_service import normalize_entity_type
@@ -225,49 +263,28 @@ def analyze_text_advanced(request: AdvancedAnalyzeRequest):
         final_results = sorted(final_results_clean, key=lambda x: x["start"])
         
         entity_results = []
+        # Manual de-identification replacement for consistency with [[TYPE-NN]] format
+        de_identified_text = text
+        # Process results from original list to assign consistent indices
         for i, res in enumerate(final_results):
+            token = f"[[{res['entity_type']}-{i+1:02d}]]"
+            res["token"] = token
             entity_results.append(EntityResult(
                 index=i+1, entity_type=res["entity_type"], text=res["text"],
                 start=res["start"], end=res["end"], score=round(res["score"], 4),
+                token=token,
                 explanation=res.get("explanation")
             ))
 
-        # ── Step 4: De-identify text ──
-        from presidio_anonymizer.entities import OperatorConfig
-        from presidio_analyzer import RecognizerResult
-
-        approach = request.de_id_approach.lower()
-        if approach == "redact":
-            operators = {"DEFAULT": OperatorConfig("redact")}
-        elif approach == "hash":
-            operators = {"DEFAULT": OperatorConfig("hash", {"hash_type": "sha256"})}
-        elif approach == "mask":
-            operators = {"DEFAULT": OperatorConfig("mask", {"masking_char": "*", "chars_to_mask": 100, "from_end": False})}
-        else:
-            operators = {"DEFAULT": OperatorConfig("replace")}
-
-        # Create RecognizerResult objects for anonymizer
-        anonymizer_results = [
-            RecognizerResult(entity_type=r["entity_type"], start=r["start"], end=r["end"], score=r["score"])
-            for r in final_results
-        ]
-
-        # ── SPECIAL HANDLING: Date Shifting vs Redaction ──
-        # If date shifting is enabled (days != 0), we want to SHIFT dates, not redact them.
-        # So we filter out DATE_TIME entities from the anonymizer list.
-        # They will be handled in Step 5 by the regex-based shifter.
-        if request.date_shift_days != 0:
-            anonymizer_results = [
-                r for r in anonymizer_results 
-                if r.entity_type != "DATE_TIME"
-            ]
-
-        anonymized = presidio_deidentification_service.anonymizer.anonymize(
-            text=text,
-            analyzer_results=anonymizer_results,
-            operators=operators,
-        )
-        de_identified_text = anonymized.text
+        # Sort backward for replacement to keep offsets valid
+        reverse_results = sorted(final_results, key=lambda x: x["start"], reverse=True)
+        for res in reverse_results:
+            # If date shifting is enabled, we skip standard replacement for dates
+            if res["entity_type"] == "DATE_TIME" and request.date_shift_days != 0:
+                continue
+            
+            token = res.get("token", "[[REDACTED]]")
+            de_identified_text = de_identified_text[:res["start"]] + token + de_identified_text[res["end"]:]
 
         # ── Step 5: Date shifting ──
         date_shifts = []
@@ -449,6 +466,28 @@ def pipeline_preview(
     except Exception as e:
         safe_logger.error(f"Pipeline preview failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/ai-correction", response_model=AICorrectionResponse)
+async def get_ai_correction(
+    request: AICorrectionRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user)
+):
+    """
+    Calls Tier-1 LLM to identify over-redacted phrases in the preview payload.
+    Provides suggestions for words that should be restored to preserve clinical context.
+    """
+    from app.services.presidio.ai_correction import ai_correction_service
+    
+    suggestions = await ai_correction_service.get_correction_suggestions(
+        db=db,
+        user_id=current_user.id,
+        de_identified_payload=request.de_identified_payload,
+        token_map=request.token_map
+    )
+    
+    return AICorrectionResponse(suggestions=suggestions)
 
 
 # ─── Vault Inspector ────────────────────────────────────────────────────────

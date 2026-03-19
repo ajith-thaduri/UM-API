@@ -81,31 +81,31 @@ class PresidioDeIdentificationService:
         """Apply strict regex for explicitly labeled fields that NER struggles with."""
         import re
         
-        # 1. Patient Name / Alias
+        # 1. Patient Name / Alias (Require colon)
         text = re.sub(r"\b(Patient(?:\s+Name)?|Name|PT):\s+([A-Z][a-z]+(?:[\s-][A-Z][a-z]+){1,3})\b", r"\1: [[PERSON-01]]", text, flags=re.IGNORECASE)
         text = re.sub(r"\b(Alias|AKA|Also known as|Goes by):\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})\b", r"\1: [[PERSON-01]]", text, flags=re.IGNORECASE)
         
-        # 2. Relatives
-        text = re.sub(r"\b(Emergency\s+Contact|Spouse|Relative)[:\s\n]+(?:Name:\s+)?[A-Z][a-z]+(?:[\s-][A-Z][a-z]+){1,2}\b", r"\1: [[REDACTED]]", text, flags=re.IGNORECASE)
+        # 2. Relatives (Require colon)
+        text = re.sub(r"\b(Emergency\s+Contact|Spouse|Relative):\s+(?:Name:\s+)?[A-Z][a-z]+(?:[\s-][A-Z][a-z]+){1,2}\b", r"\1: [[REDACTED]]", text, flags=re.IGNORECASE)
         
-        # 3. Employer
-        text = re.sub(r"\b(Employer)[:\s]+(?:[A-Z][A-Za-z.'-]+(?:[ \t]+[A-Z][A-Za-z.'-]+){0,3})[ \t]+(?:Corporation|Corp\.|Inc\.|LLC|Company|Logistics|Power[ \t]+Plant|Bank|Pharmacy|Group)\b", r"\1: [[ORGANIZATION-01]]", text, flags=re.IGNORECASE)
+        # 3. Employer (Require colon)
+        text = re.sub(r"\b(Employer):\s+(?:[A-Z][A-Za-z.'-]+(?:[ \t]+[A-Z][A-Za-z.'-]+){0,3})[ \t]+(?:Corporation|Corp\.|Inc\.|LLC|Company|Logistics|Power[ \t]+Plant|Bank|Pharmacy|Group)\b", r"\1: [[ORGANIZATION-01]]", text, flags=re.IGNORECASE)
         
-        # 4. Username
-        text = re.sub(r"\b(Username|User\s*ID|Login|Portal\s*Username)[:\s]+[a-zA-Z0-9._-]+\b", r"\1: [[REDACTED]]", text, flags=re.IGNORECASE)
+        # 4. Username / Login (Require colon)
+        text = re.sub(r"\b(Username|User\s*ID|Login|Portal\s*Username):\s+[a-zA-Z0-9._-]+\b", r"\1: [[REDACTED]]", text, flags=re.IGNORECASE)
         
-        # 5. Geographics (County / Country / State)
+        # 5. Geographics (County / Country / State) (Already require colon)
         text = re.sub(r"\b(County):[ \t]+[A-Z][a-z]+(?:[ \t]+[A-Z][a-z]+){0,2}[ \t]+County\b", r"\1: [[LOCATION-01]]", text, flags=re.IGNORECASE)
         text = re.sub(r"\b(Country):[ \t]+[A-Z][a-z]+(?:[ \t]+[A-Z][a-z]+){0,2}\b", r"\1: [[LOCATION-01]]", text, flags=re.IGNORECASE)
         text = re.sub(r"\b(State):[ \t]+(?:AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY)\b", r"\1: [[LOCATION-01]]", text, flags=re.IGNORECASE)
         
-        # 6. Phone Number
-        text = re.sub(r"\b(Phone|Tel|Mobile|Cell|Fax)[:\s]+(?:\+?\d{1,3}[-.\s])?\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}\b", r"\1: [[PHONE_NUMBER-01]]", text, flags=re.IGNORECASE)
+        # 6. Phone Number (Require colon)
+        text = re.sub(r"\b(Phone|Tel|Mobile|Cell|Fax):\s+(?:\+?\d{1,3}[-.\s])?\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}\b", r"\1: [[PHONE_NUMBER-01]]", text, flags=re.IGNORECASE)
         text = re.sub(r"\btel:\+?\d{7,15}\b", "[[PHONE_NUMBER-01]]", text, flags=re.IGNORECASE)
         text = re.sub(r"\b(State):[ \t]+(?:Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|Delaware|Florida|Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|Kentucky|Louisiana|Maine|Maryland|Massachusetts|Michigan|Minnesota|Mississippi|Missouri|Montana|Nebraska|Nevada|New[ \t]Hampshire|New[ \t]Jersey|New[ \t]Mexico|New[ \t]York|North[ \t]Carolina|North[ \t]Dakota|Ohio|Oklahoma|Oregon|Pennsylvania|Rhode[ \t]Island|South[ \t]Carolina|South[ \t]Dakota|Tennessee|Texas|Utah|Vermont|Virginia|Washington|West[ \t]Virginia|Wisconsin|Wyoming)\b", r"\1: [[LOCATION-01]]", text, flags=re.IGNORECASE)
 
-        # 6. URL
-        text = re.sub(r"\b(URL|Website|Web|Link|Patient\s+Portal)[:\s]+(?:https?://|www[:.]?)[a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+(?:/[a-zA-Z0-9._?=&%/#~+-]*)?\b", r"\1: [[URL-01]]", text, flags=re.IGNORECASE)
+        # 7. URL (Require colon)
+        text = re.sub(r"\b(URL|Website|Web|Link|Patient\s+Portal):\s+(?:https?://|www[:.]?)[a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+(?:/[a-zA-Z0-9._?=&%/#~+-]*)?\b", r"\1: [[URL-01]]", text, flags=re.IGNORECASE)
 
         return text
 
@@ -142,6 +142,35 @@ class PresidioDeIdentificationService:
     def _replace_in_string(self, text: str) -> str:
         """Backward-compat delegate → token_replacer.replace_in_string"""
         return replace_in_string(text, self._variant_token_map, self._strip_list)
+
+    def _filter_email_person_overlap(self, results: List[Any]) -> List[Any]:
+        """Backward-compat shim for legacy tests."""
+        # Note: In modular v2, this is integrated into Rule 4 of sanitize_ner_results.
+        # This shim provides a basic overlap prevention for tests that don't pass text.
+        email_spans = [r for r in results if r.entity_type == "EMAIL_ADDRESS"]
+        if not email_spans:
+            return results
+        filtered = []
+        for r in results:
+            if r.entity_type == "PERSON":
+                if any(not (r.end <= e.start or r.start >= e.end) for e in email_spans):
+                    continue
+            filtered.append(r)
+        return filtered
+
+    def _process_single_string(self, text: str, shift_days: int = 0) -> str:
+        """Backward-compat shim for legacy doc stress tests."""
+        # 1. Deterministic replacement
+        de_id = replace_in_string(text, self._variant_token_map, self._strip_list)
+        # 2. Regex
+        de_id = self._apply_deterministic_regex(de_id)
+        # 3. Date shift
+        de_id = shift_dates_in_text(de_id, shift_days)
+        # 4. NER
+        if self.analyzer:
+            analyzed = self.analyzer.analyze(text=de_id, language="en")
+            de_id = process_residual_phi_in_string(de_id, analyzed, self._variant_token_map, shift_days)
+        return de_id
 
 
     def de_identify_for_summary(

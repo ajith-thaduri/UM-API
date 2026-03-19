@@ -20,7 +20,11 @@ def is_date_field(field_name: str) -> bool:
 
 
 def shift_single_date(date_str: str, shift_days: int) -> str:
-    """Shift a single date string by shift_days. Returns original if unparseable."""
+    """Shift a single date string. Returns original if unparseable or redaction if strict DD/MM."""
+    from app.utils.date_utils import is_strict_dd_mm_yyyy
+    if is_strict_dd_mm_yyyy(date_str):
+        return "[[REDACTED]]"
+
     for fmt in ["%Y-%m-%d", "%m/%d/%Y", "%Y-%m-%d %H:%M:%S"]:
         try:
             dt = datetime.strptime(date_str, fmt)
@@ -70,13 +74,16 @@ def shift_dates_structured(
                             {"path": field_path, "original": value, "shifted": shifted_value}
                         )
                     result[key] = shifted_value
+                elif isinstance(value, str):
+                    # For non-date fields, still perform a regex-based shift for any dates within the text
+                    result[key] = shift_dates_in_text(value, shift_days)
                 else:
                     result[key] = _recurse(value, field_path)
             return result
         elif isinstance(obj, list):
             return [_recurse(item, f"{current_path}[{i}]") for i, item in enumerate(obj)]
         elif isinstance(obj, str):
-            return obj
+            return shift_dates_in_text(obj, shift_days)
         return obj
 
     shifted_data = _recurse(data, path)

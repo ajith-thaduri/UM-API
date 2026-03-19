@@ -19,6 +19,7 @@ from .constants import (
     TOKENIZE_TYPES, STRIP_TYPES, normalize_entity_type, FREE_TEXT_FIELDS
 )
 from .ner_sanitizer import sanitize_ner_results, resolve_overlapping_spans
+from app.utils.date_utils import is_valid_mm_dd_yyyy, is_strict_dd_mm_yyyy
 
 safe_logger = get_safe_logger(__name__)
 
@@ -86,13 +87,22 @@ def process_residual_phi_in_string(
 
         # TIER C: DATE — safety-shift residual dates
         if entity_type == "DATE_TIME":
-            # If it's already in MM/DD/YYYY format, it's likely already shifted by a previous pass
-            # (e.g. the global shift_dates_in_text called before this). Skip to avoid double-shifting.
-            if re.match(r"^\d{1,2}/\d{1,2}/\d{4}$", entity_text):
+            # If it's a valid MM/DD/YYYY format, it likely came from the global shift_dates_in_text
+            # called before this stage. We skip to avoid double-shifting.
+            if is_valid_mm_dd_yyyy(entity_text):
                 continue
-            shifted = _shift_dates_in_text(entity_text, shift_days)
-            new_text = new_text[:res.start] + shifted + new_text[res.end:]
-            continue
+
+            # If it's unambiguously DD/MM/YYYY (e.g. 31/12/2024), we explicitly redact.
+            if is_strict_dd_mm_yyyy(entity_text):
+                new_text = new_text[:res.start] + "[[REDACTED]]" + new_text[res.end:]
+                continue
+            else:
+                # Attempt to shift other formats
+                shifted = _shift_dates_in_text(entity_text, shift_days)
+                if shifted != entity_text:
+                    new_text = new_text[:res.start] + shifted + new_text[res.end:]
+                    continue
+                # If shifting failed or returned the same text, fall through to redact
 
         # TIER D: AGE — redact ages ≥ 90 only
         if entity_type == "AGE":

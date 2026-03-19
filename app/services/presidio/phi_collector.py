@@ -38,6 +38,9 @@ def collect_known_phi(patient_name: str, case_metadata: Dict) -> Dict[str, Any]:
             "type": "PERSON", "canonical": patient_name, "variants": set()
         }
         parts = patient_name.split()
+        for p in parts:
+            if len(p) > 2:
+                patient_identity["variants"].add(p)
         if len(parts) >= 3:
             patient_identity["variants"].add(f"{parts[0]} {parts[-1]}")
             patient_identity["variants"].add(f"{parts[0]} {parts[1]}")
@@ -92,14 +95,22 @@ def collect_known_phi(patient_name: str, case_metadata: Dict) -> Dict[str, Any]:
         if org_val:
             identities.append({"type": "ORGANIZATION", "canonical": org_val, "variants": []})
 
-    # ── 5. Strips (zero clinical value) ───────────────────────────────────────
-    strip_fields = [
-        "mrn", "ssn", "case_number", "phone", "email",
-        "address", "zip", "city", "state", "insurance_id", "npi",
-        "account_number", "health_plan_id", "dob",
-        "passport", "license", "vehicle_plate",
+    # ── 5. IDs (Tokenized as [[ID-NN]]) ──────────────────────────────────────
+    id_fields = [
+        "mrn", "ssn", "case_number", "insurance_id", "npi",
+        "account_number", "health_plan_id",
         "SSN", "Medical Record Number (MRN)", "Case Number",
         "Health Plan ID", "Account Number", "NPI (Attending)",
+        "passport", "license", "vehicle_plate",
+    ]
+    for field in id_fields:
+        val = case_metadata.get(field)
+        if val:
+            identities.append({"type": "ID", "canonical": str(val), "variants": []})
+
+    # ── 6. Strips (zero clinical value, redacted as [[REDACTED]]) ─────────────
+    strip_fields = [
+        "phone", "email", "address", "zip", "city", "state", "dob",
     ]
     for field in strip_fields:
         val = case_metadata.get(field)
@@ -108,12 +119,12 @@ def collect_known_phi(patient_name: str, case_metadata: Dict) -> Dict[str, Any]:
 
     for k, v in case_metadata.items():
         k_lower = k.lower()
-        if any(x in k_lower for x in ["email", "phone", "mobile", "home", "fax"]):
-            if v:
-                strips.add(str(v))
+        if any(x in k_lower for x in ["email", "phone", "mobile", "home phone", "home address", "fax"]):
+            if v and isinstance(v, str) and len(v) > 3:
+                strips.add(str(v).strip())
         if any(x in k_lower for x in ["employer", "company", "workplace", "insurer", "payer", "bank"]):
-            if v and isinstance(v, str):
-                identities.append({"type": "ORGANIZATION", "canonical": v, "variants": []})
+            if v and isinstance(v, str) and len(v) > 3:
+                identities.append({"type": "ORGANIZATION", "canonical": v.strip(), "variants": []})
 
     safe_logger.info(f"Collected {len(identities)} identities and {len(strips)} strip values")
     return {"identities": identities, "strips": list(strips)}

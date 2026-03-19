@@ -75,12 +75,46 @@ DoctorRecognizer = PatternRecognizer(
 )
 
 # HIPAA Category #1: Full Patient Names
+# ─────────────────────────────────────────────────────────────────────────────
+# FIELD_LABEL_STOP: words that must NOT be consumed as part of a name.
+# Used in the negative-lookahead so greedy repetition stops at field labels.
+_FIELD_LABEL_STOP = (
+    r"(?:Date|DOB|SSN|Phone|Email|Address|Age|Sex|MRN|NPI"
+    r"|Alias|AKA|Also|Goes|Employer|Username|Login|URL|ID"
+    r"|Insurance|Passport|License|County|ZIP|Zip|Fax|Time)\b"
+)
+_MEDICAL_CONTEXT_STOP = (
+    r"(?:Medical|Center|Hospital|Clinic|Health|Pharmacy|Group|System|Laboratory"
+    r"|Diabetes|Mellitus|Hypertension|Failure|Disease|Syndrome|Disorder|Infection"
+    r"|Cancer|Tumor|Carcinoma|Lymphoma|Neuropathy|Retinopathy|Nephropathy"
+    r"|Pressure|Saturation|Rate|Count|Panel|Analysis|Culture|Function|Test|Level|Ratio"
+    r"|Glucose|Cholesterol|Creatinine|Albumin|Hemoglobin|Platelet|Sodium|Potassium"
+    r"|Metformin|Albuterol|Theophylline|Fluticasone|Lisinopril|Atorvastatin"
+    r"|Aspirin|Insulin|Warfarin|Amoxicillin|Ibuprofen|Omeprazole"
+    r"|Pulmonary|Respiratory|Arterial|Venous|Cardiac|Renal|Hepatic|Thyroid"
+    r"|Examination|Assessment|Evaluation|Screening|Biopsy|Imaging|Radiology)\b"
+)
+
 name_patterns = [
-    Pattern("Labeled Patient Name", r"\b(?:Patient(?:\s+Name)?|Name|PT)[:\s]+([A-Z][a-z]+(?:[\s-][A-Z][a-z]+){1,3})\b", 0.95),
-    Pattern("Alias Label", r"\b(?:Alias|AKA|Also known as|Goes by)[:\s]+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})\b", 0.95),
+    # Requires a colon after the label (fixes: 'patient john doe' no-colon bug).
+    # Negative lookahead stops consuming capitalized field-label words (fixes: 'Date' eaten into name).
+    Pattern(
+        "Labeled Patient Name",
+        r"\b(?:Patient(?:\s+Name)?|Name|PT)\s*:\s*"
+        r"([A-Z][a-z]+"
+        r"(?:\s+(?!" + _FIELD_LABEL_STOP + r")[A-Z][a-z]+){0,3})",
+        0.95,
+    ),
+    # Alias: allow lowercase first letter (jonny, jimmy …) + optional leading comma
+    Pattern(
+        "Alias Label",
+        r"(?:,\s*)?\b(?:Alias|AKA|Also\s+known\s+as|Goes\s+by)[:\s]+"
+        r"([A-Za-z][a-z]+(?:\s+[A-Za-z][a-z]+){0,3})\b",
+        0.95,
+    ),
     Pattern("Emergency Contact", r"\b(?:Emergency\s+Contact|Spouse|Relative)[:\s\n]+(?:Name[:\s]+)?([A-Z][a-z]+(?:[\s-][A-Z][a-z]+){1,2})\b", 0.95),
     Pattern("Name with Salutation", r"\b(?:Mr\.|Ms\.|Mrs\.|Miss)\s+([A-Z][a-z]+)\s+([A-Z][a-z]+)\b", 0.95),
-    Pattern("Contextual Full Name", r"\b(?!(?:Medical|Center|Hospital|Clinic|Health|Pharmacy|Group|System|Laboratory)\b)([A-Z][a-z]+)\s(?!(?:Medical|Center|Hospital|Clinic|Health|Pharmacy|Group|System|Laboratory)\b)([A-Z][a-z]+)\b", 0.85) 
+    Pattern("Contextual Full Name", rf"\b(?!{_MEDICAL_CONTEXT_STOP})([A-Z][a-z]+)\s(?!{_MEDICAL_CONTEXT_STOP})([A-Z][a-z]+)\b", 0.85)
 ]
 
 FullNameRecognizer = PatternRecognizer(
@@ -396,9 +430,24 @@ CVVRecognizer = PatternRecognizer(
     name="CVV_Recognizer"
 )
 # Usernames
+# ─────────────────────────────────────────────────────────────────────────────
+# Two labeled variants:
+#   - Colon separator  e.g. "Username: johndoe@123"
+#   - Space-only       e.g. "username johndoe@123"
+# Both use a capture group (index 1) so the label word is NEVER in the span.
+# The generic pattern (no label) is kept at a higher score to reduce FPs.
 username_patterns = [
-    Pattern("Labeled Username", r"\b(?:Username|User\s*ID|Login|Portal\s*Username)[:\s]+([a-zA-Z0-9._-]+)\b", 0.99),
-    Pattern("Username", r"\b[a-z][a-z0-9._-]*[0-9._-]+[a-z0-9._-]*\b", 0.80)
+    Pattern(
+        "Labeled Username Colon",
+        r"\b(?:Username|User\s*ID|Login|Portal\s*Username)\s*:\s*([a-zA-Z0-9._@-]+)\b",
+        0.99,
+    ),
+    Pattern(
+        "Labeled Username Space",
+        r"\b(?:Username|User\s*ID|Login|Portal\s*Username)\s+([a-zA-Z0-9][a-zA-Z0-9._@-]*[0-9._@-]+[a-zA-Z0-9._@-]*)\b",
+        0.95,
+    ),
+    Pattern("Username", r"\b[a-z][a-z0-9._-]*[0-9._-]+[a-z0-9._-]*\b", 0.85),
 ]
 UsernameRecognizer = PatternRecognizer(
     supported_entity="USERNAME",
@@ -421,8 +470,14 @@ FilenameRecognizer = PatternRecognizer(
 )
 
 # Alias / AKA detection (explicitly labeled alternative names)
+# Allows lowercase-first names (jonny, jimmy …) and optional leading comma.
 alias_patterns = [
-    Pattern("Alias Label", r"\b(?:Alias|AKA|Also known as|Goes by)[:\s]+([A-Z][a-z]+(?:\s[A-Z][a-z]+){0,3})\b", 0.99),
+    Pattern(
+        "Alias Label",
+        r"(?:,\s*)?\b(?:Alias|AKA|Also\s+known\s+as|Goes\s+by)[:\s]+"
+        r"([A-Za-z][a-z]+(?:\s+[A-Za-z][a-z]+){0,3})\b",
+        0.99,
+    ),
 ]
 AliasRecognizer = PatternRecognizer(
     supported_entity="PERSON",
