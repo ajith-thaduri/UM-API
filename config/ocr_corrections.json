@@ -1,0 +1,13 @@
+{
+  "replacements": [
+    ["Unic", "Uric"],
+    ["¥", "/"],
+    ["V", "/"],
+    ["Paitnet", "Patient"],
+    ["Assesment", "Assessment"],
+    ["Paitient", "Patient"],
+    ["Patiet", "Patient"],
+    ["Assesssment", "Assessment"],
+    ["Uiric", "Uric"]
+  ]
+}

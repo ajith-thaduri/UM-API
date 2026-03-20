@@ -1,0 +1,30 @@
+﻿Original: patient name : John doe Date of Birth : 17/2/1967
+Redacted: patient name : [[PERSON-01]] Date of Birth : [[REDACTED]]
+--------------------------------------------------
+Original: patient name : John doe DOB:17/2/21967
+Redacted: patient name : [[PERSON-01]] DOB:[[REDACTED]]
+--------------------------------------------------
+Original: patient john doe
+Redacted: patient [[PERSON-01]]
+--------------------------------------------------
+Original: patient name : John Doe , also know as jonny doe
+Redacted: patient name : [[PERSON-01]] , also know as [[PERSON-02]]
+--------------------------------------------------
+Original: username johndoe@123
+Redacted: username [[REDACTED]]
+--------------------------------------------------
+Original: 56 year-old
+Redacted: 56 [[REDACTED]]
+--------------------------------------------------
+Original: age:56
+Redacted: age:56
+--------------------------------------------------
+Original: Patient Summary is here.
+Redacted: Patient Summary [[PERSON-02]].
+--------------------------------------------------
+Original: Doctor Information is here.
+Redacted: Doctor Information is here.
+--------------------------------------------------
+Original: Doctor Name: Dwayne Jones Doctor Unique ID: DR31186C Patient Summary Patient Demographics Patient Lifestyle Patient Vitals Doctor Information Doctor Notes
+Redacted: Doctor Name: [[PERSON-02]]: [[REDACTED]] Patient Summary Patient Demographics Patient Lifestyle Patient Vitals Doctor Information Doctor Notes
+--------------------------------------------------
