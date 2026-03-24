@@ -2,6 +2,12 @@
 
 from app.db.session import Base
 from app.models.case import Case, CaseStatus, Priority
+from app.models.case_version import (
+    CaseVersion,
+    CaseVersionFile,
+    CaseVersionStatus,
+    CaseVersionFileRole,
+)
 from app.models.case_file import CaseFile
 from app.models.extraction import ClinicalExtraction
 from app.models.user import User
@@ -36,6 +42,10 @@ __all__ = [
     "Case",
     "CaseStatus",
     "Priority",
+    "CaseVersion",
+    "CaseVersionFile",
+    "CaseVersionStatus",
+    "CaseVersionFileRole",
     "CaseFile",
     "ClinicalExtraction",
     "User",

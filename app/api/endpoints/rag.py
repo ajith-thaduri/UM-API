@@ -1,7 +1,10 @@
 """RAG API endpoints for follow-up questions and chunk retrieval"""
 
-from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query
+import json
+from typing import Any, Dict, List, Optional
+
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from datetime import datetime
@@ -36,6 +39,14 @@ class SourceReference(BaseModel):
     text_preview: Optional[str] = None
 
 
+class TraceStep(BaseModel):
+    """Single agent trace step for the case chat UI."""
+
+    id: str
+    label: str
+    status: str = "done"
+
+
 class QueryResponse(BaseModel):
     """Response from a follow-up question"""
     answer: str
@@ -43,6 +54,13 @@ class QueryResponse(BaseModel):
     chunks_used: List[str]
     confidence: float
     suggested_actions: List[str]
+    trace_steps: List[TraceStep] = Field(default_factory=list)
+    context_summary: Optional[str] = None
+    active_version_summary: Optional[Dict[str, Any]] = None
+    used_artifacts: List[str] = Field(default_factory=list)
+    structured_blocks: Optional[Dict[str, Any]] = None
+    resolved_intent: Optional[str] = None
+    show_trace: bool = True
 
 
 class ConversationMessage(BaseModel):
@@ -51,6 +69,7 @@ class ConversationMessage(BaseModel):
     content: str
     timestamp: str
     sources: List[dict] = []
+    agent_metadata: Optional[Dict[str, Any]] = None
 
 
 class ConversationHistoryResponse(BaseModel):
@@ -115,6 +134,9 @@ class ChunkSearchResponse(BaseModel):
 async def query_dashboard(
     case_id: str,
     request: QueryRequest,
+    case_version_id: Optional[str] = Query(
+        None, description="Processing version; defaults to case live version"
+    ),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -131,16 +153,28 @@ async def query_dashboard(
     case = case_repo.get_by_id(db, case_id, user_id=current_user.id)
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
-    
+    vid = case_version_id or case.live_version_id
+
     try:
         response = await main_agent.answer_follow_up_question(
             db=db,
             case_id=case_id,
             question=request.question,
             include_dashboard_context=request.include_dashboard_context,
-            user_id=current_user.id
+            user_id=current_user.id,
+            case_version_id=vid,
         )
         
+        trace = [
+            TraceStep(
+                id=t.get("id", ""),
+                label=t.get("label", ""),
+                status=t.get("status", "done"),
+                tool=t.get("tool"),
+                detail=t.get("detail"),
+            )
+            for t in (response.trace_steps or [])
+        ]
         return QueryResponse(
             answer=response.answer,
             sources=[
@@ -157,7 +191,14 @@ async def query_dashboard(
             ],
             chunks_used=response.chunks_used,
             confidence=response.confidence,
-            suggested_actions=response.suggested_actions
+            suggested_actions=response.suggested_actions,
+            trace_steps=trace,
+            context_summary=response.context_summary,
+            active_version_summary=response.active_version_summary,
+            used_artifacts=response.used_artifacts or [],
+            structured_blocks=response.structured_blocks,
+            resolved_intent=response.resolved_intent,
+            show_trace=response.show_trace,
         )
         
     except Exception as e:
@@ -171,9 +212,71 @@ async def query_dashboard(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/dashboard/{case_id}/query/stream")
+async def query_dashboard_stream(
+    case_id: str,
+    request: QueryRequest,
+    case_version_id: Optional[str] = Query(
+        None, description="Processing version; defaults to case live version"
+    ),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Stream case-agent execution as NDJSON: ``trace_delta`` lines, then one ``final`` object
+    (same fields as ``POST .../query``). History is persisted after ``final``.
+    """
+    from app.db.dependencies import get_case_repository
+
+    case_repo = get_case_repository()
+    case = case_repo.get_by_id(db, case_id, user_id=current_user.id)
+    if not case:
+        raise HTTPException(status_code=404, detail="Case not found")
+    vid = case_version_id or case.live_version_id
+
+    async def ndjson_bytes():
+        try:
+            async for event in main_agent.stream_follow_up_question(
+                db=db,
+                case_id=case_id,
+                question=request.question,
+                user_id=current_user.id,
+                include_dashboard_context=request.include_dashboard_context,
+                case_version_id=vid,
+            ):
+                line = json.dumps(event, default=str) + "\n"
+                yield line.encode("utf-8")
+        except Exception as e:
+            err_str = str(e).lower()
+            if (
+                "529" in err_str
+                or "overloaded" in err_str
+                or "503" in err_str
+                or "429" in err_str
+                or "rate" in err_str
+            ):
+                payload = {
+                    "type": "error",
+                    "detail": "The AI service is temporarily overloaded. Please try again in a moment.",
+                    "status": 503,
+                }
+            else:
+                payload = {"type": "error", "detail": str(e), "status": 500}
+            yield (json.dumps(payload) + "\n").encode("utf-8")
+
+    return StreamingResponse(
+        ndjson_bytes(),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @router.get("/dashboard/{case_id}/conversation", response_model=ConversationHistoryResponse)
 async def get_conversation_history(
     case_id: str,
+    case_version_id: Optional[str] = Query(
+        None, description="Defaults to live version"
+    ),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -186,7 +289,10 @@ async def get_conversation_history(
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
     
-    history = main_agent.get_conversation_history(db, case_id, current_user.id)
+    vid = case_version_id or case.live_version_id
+    history = main_agent.get_conversation_history(
+        db, case_id, current_user.id, case_version_id=vid
+    )
     
     return ConversationHistoryResponse(
         case_id=case_id,
@@ -195,7 +301,8 @@ async def get_conversation_history(
                 role=msg["role"],
                 content=msg["content"],
                 timestamp=msg["timestamp"],
-                sources=msg.get("sources", [])
+                sources=msg.get("sources", []),
+                agent_metadata=msg.get("agent_metadata"),
             )
             for msg in history
         ]
@@ -205,6 +312,9 @@ async def get_conversation_history(
 @router.delete("/dashboard/{case_id}/conversation")
 async def clear_conversation_history(
     case_id: str,
+    case_version_id: Optional[str] = Query(
+        None, description="Defaults to live version"
+    ),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -217,7 +327,10 @@ async def clear_conversation_history(
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
     
-    main_agent.clear_conversation_history(db, case_id, current_user.id)
+    vid = case_version_id or case.live_version_id
+    main_agent.clear_conversation_history(
+        db, case_id, current_user.id, case_version_id=vid
+    )
     return {"success": True, "message": "Conversation history cleared"}
 
 
@@ -225,8 +338,10 @@ async def clear_conversation_history(
 async def rerun_agent(
     case_id: str,
     facet_type: FacetType,
-    request: RerunAgentRequest = None,
-    db: Session = Depends(get_db)
+    case_version_id: Optional[str] = Query(None, description="Defaults to live version"),
+    body: Optional[RerunAgentRequest] = Body(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """
     Rerun a specific agent for a case
@@ -238,7 +353,9 @@ async def rerun_agent(
             db=db,
             case_id=case_id,
             facet_type=facet_type,
-            query_refinement=request.query_refinement if request else None
+            query_refinement=body.query_refinement if body else None,
+            user_id=current_user.id,
+            case_version_id=case_version_id,
         )
         
         return RerunAgentResponse(**result)
@@ -251,10 +368,27 @@ async def rerun_agent(
 async def get_chunk_source(
     case_id: str,
     chunk_id: str,
+    case_version_id: Optional[str] = Query(
+        None, description="Defaults to live version; must match chunk's version"
+    ),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Get source information for a specific chunk"""
+    from app.db.dependencies import get_case_repository
+
+    case_repo = get_case_repository()
+    case = case_repo.get_by_id(db, case_id, user_id=current_user.id)
+    if not case:
+        raise HTTPException(status_code=404, detail="Case not found")
+    vid = case_version_id or case.live_version_id
+
+    row = chunk_repository.get_by_id(db, chunk_id)
+    if not row or row.case_id != case_id:
+        raise HTTPException(status_code=404, detail="Chunk not found")
+    if vid and row.case_version_id != vid:
+        raise HTTPException(status_code=404, detail="Chunk not found for this version")
+
     source_service = build_source_link_service()
     chunk_data = source_service.get_chunk_source(db, chunk_id)
     
@@ -291,9 +425,25 @@ async def get_chunk_source(
 async def get_chunk_by_vector_id(
     case_id: str,
     vector_id: str,
-    db: Session = Depends(get_db)
+    case_version_id: Optional[str] = Query(None, description="Defaults to live version"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Get source information for a chunk by vector ID"""
+    from app.db.dependencies import get_case_repository
+
+    case_repo = get_case_repository()
+    case = case_repo.get_by_id(db, case_id, user_id=current_user.id)
+    if not case:
+        raise HTTPException(status_code=404, detail="Case not found")
+    vid = case_version_id or case.live_version_id
+
+    row = chunk_repository.get_by_vector_id(db, vector_id)
+    if not row or row.case_id != case_id:
+        raise HTTPException(status_code=404, detail="Chunk not found")
+    if vid and row.case_version_id != vid:
+        raise HTTPException(status_code=404, detail="Chunk not found for this version")
+
     source_service = build_source_link_service()
     chunk_data = source_service.get_chunk_by_vector_id(db, vector_id)
     
@@ -311,7 +461,9 @@ async def get_chunk_by_vector_id(
 async def search_chunks(
     case_id: str,
     request: ChunkSearchRequest,
-    db: Session = Depends(get_db)
+    case_version_id: Optional[str] = Query(None, description="Defaults to live version"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """
     Search chunks within a case using semantic search
@@ -326,14 +478,25 @@ async def search_chunks(
         if request.section_filter:
             section_filter = [SectionType(s) for s in request.section_filter]
         
-        # Retrieve chunks
+        from app.db.dependencies import get_case_repository
+
+        case_repo = get_case_repository()
+        case = case_repo.get_by_id(db, case_id, user_id=current_user.id)
+        if not case:
+            raise HTTPException(status_code=404, detail="Case not found")
+        vid = case_version_id or case.live_version_id
+
         chunks = rag_retriever.retrieve_for_query(
             db=db,
             query=request.query,
             case_id=case_id,
+            user_id=current_user.id,
             top_k=request.top_k,
-            section_filter=section_filter
+            case_version_id=vid,
         )
+        if section_filter:
+            allowed = {s.value for s in section_filter}
+            chunks = [c for c in chunks if c.section_type.value in allowed]
         
         results = [
             ChunkSearchResult(
@@ -365,7 +528,9 @@ async def list_case_chunks(
     section_type: Optional[str] = Query(default=None),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
-    db: Session = Depends(get_db)
+    case_version_id: Optional[str] = Query(None, description="Defaults to live version"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """
     List all chunks for a case
@@ -375,11 +540,19 @@ async def list_case_chunks(
     from app.models.document_chunk import SectionType
     
     try:
+        from app.db.dependencies import get_case_repository
+
+        case_repo = get_case_repository()
+        case = case_repo.get_by_id(db, case_id, user_id=current_user.id)
+        if not case:
+            raise HTTPException(status_code=404, detail="Case not found")
+        vid = case_version_id or case.live_version_id
+
         if section_type:
             section_enum = SectionType(section_type)
-            chunks = chunk_repository.get_by_section(db, case_id, section_enum)
+            chunks = chunk_repository.get_by_section(db, case_id, section_enum, case_version_id=vid)
         else:
-            chunks = chunk_repository.get_by_case_id(db, case_id)
+            chunks = chunk_repository.get_by_case_id(db, case_id, case_version_id=vid)
         
         # Apply pagination
         start = (page - 1) * page_size
@@ -413,16 +586,27 @@ async def list_case_chunks(
 @router.get("/dashboard/{case_id}/chunks/stats")
 async def get_chunk_stats(
     case_id: str,
-    db: Session = Depends(get_db)
+    case_version_id: Optional[str] = Query(None, description="Defaults to live version"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Get chunk statistics for a case"""
     from app.models.document_chunk import SectionType
-    
-    total = chunk_repository.count_by_case(db, case_id)
+    from app.db.dependencies import get_case_repository
+
+    case_repo = get_case_repository()
+    case = case_repo.get_by_id(db, case_id, user_id=current_user.id)
+    if not case:
+        raise HTTPException(status_code=404, detail="Case not found")
+    vid = case_version_id or case.live_version_id
+
+    total = chunk_repository.count_by_case(db, case_id, case_version_id=vid)
     
     section_counts = {}
     for section_type in SectionType:
-        count = chunk_repository.count_by_section(db, case_id, section_type)
+        count = chunk_repository.count_by_section(
+            db, case_id, section_type, case_version_id=vid
+        )
         if count > 0:
             section_counts[section_type.value] = count
     

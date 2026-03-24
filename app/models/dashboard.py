@@ -40,6 +40,9 @@ class DashboardSnapshot(Base):
 
     id = Column(String, primary_key=True, index=True)
     case_id = Column(String, ForeignKey("cases.id"), nullable=False, index=True)
+    case_version_id = Column(
+        String, ForeignKey("case_versions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     version = Column(Integer, nullable=False, default=1)
     # Store enum as varchar to avoid PostgreSQL enum value mismatches
@@ -54,8 +57,9 @@ class DashboardSnapshot(Base):
     
     # Performance indexes
     __table_args__ = (
-        Index('idx_snapshot_case_user', 'case_id', 'user_id'),  # For user dashboard queries
-        Index('idx_snapshot_case_created', 'case_id', 'created_at'),  # For latest snapshot queries
+        Index('idx_snapshot_case_user', 'case_id', 'user_id'),
+        Index('idx_snapshot_version_user', 'case_version_id', 'user_id'),
+        Index('idx_snapshot_case_created', 'case_id', 'created_at'),
     )
 
     facets = relationship(
@@ -74,6 +78,9 @@ class FacetResult(Base):
     id = Column(String, primary_key=True, index=True)
     snapshot_id = Column(String, ForeignKey("dashboard_snapshots.id"), nullable=False)
     case_id = Column(String, ForeignKey("cases.id"), nullable=False, index=True)
+    case_version_id = Column(
+        String, ForeignKey("case_versions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     facet_type = Column(
         Enum(FacetType, native_enum=False, length=50),
@@ -111,6 +118,9 @@ class SourceLink(Base):
 
     id = Column(String, primary_key=True, index=True)
     case_id = Column(String, ForeignKey("cases.id"), nullable=False, index=True)
+    case_version_id = Column(
+        String, ForeignKey("case_versions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     facet_id = Column(String, ForeignKey("facet_results.id"), nullable=False, index=True)
     item_id = Column(String, nullable=False)

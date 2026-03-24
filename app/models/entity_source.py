@@ -21,6 +21,9 @@ class EntitySource(Base):
     
     id = Column(String, primary_key=True, index=True)
     case_id = Column(String, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
+    case_version_id = Column(
+        String, ForeignKey("case_versions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     
     # Entity identification

@@ -32,6 +32,9 @@ class DocumentChunk(Base):
 
     id = Column(String, primary_key=True, index=True)
     case_id = Column(String, ForeignKey("cases.id"), nullable=False, index=True)
+    case_version_id = Column(
+        String, ForeignKey("case_versions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     file_id = Column(String, ForeignKey("case_files.id"), nullable=False, index=True)
     user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     
@@ -75,8 +78,9 @@ class DocumentChunk(Base):
     
     # Performance indexes
     __table_args__ = (
-        Index('idx_chunk_case_section', 'case_id', 'section_type'),  # For section-filtered queries
-        Index('idx_chunk_file_page', 'file_id', 'page_number'),      # For page-level retrievals
+        Index('idx_chunk_case_section', 'case_id', 'section_type'),
+        Index('idx_chunk_version_section', 'case_version_id', 'section_type'),
+        Index('idx_chunk_file_page', 'file_id', 'page_number'),
         Index(
             'idx_embedding_cosine',
             'embedding',
@@ -88,6 +92,7 @@ class DocumentChunk(Base):
     
     # Relationships
     case = relationship("Case", backref="chunks")
+    case_version = relationship("CaseVersion", backref="document_chunks")
     file = relationship("CaseFile", backref="chunks")
 
     def __repr__(self):

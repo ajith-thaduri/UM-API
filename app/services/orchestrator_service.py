@@ -45,18 +45,36 @@ class OrchestratorService:
         user_id: str,
         facet: Optional[FacetType] = None,
         force_reprocess: bool = False,
+        case_version_id: Optional[str] = None,
     ) -> DashboardSnapshot:
         """Build dashboard snapshot. Optionally rebuild a single facet."""
         case = self.case_repository.get_by_id(db, case_id, user_id=user_id)
         if not case:
             raise ValueError("Case not found")
 
-        extraction = self._get_or_process_extraction(db, case_id, force_reprocess)
+        from app.repositories.case_version_repository import case_version_repository
 
-        version = self.snapshot_repository.next_version(db, case_id, user_id)
+        vid = case_version_id or case.live_version_id
+        if case_version_id:
+            v = case_version_repository.get_by_id_for_user(db, case_version_id, user_id)
+            if not v or v.case_id != case_id:
+                raise ValueError("Invalid case version for this case")
+            vid = case_version_id
+        if not vid:
+            raise ValueError("Case has no version; cannot build dashboard")
+        case_version_id = vid
+
+        extraction = self._get_or_process_extraction(
+            db, case_id, force_reprocess, case_version_id=case_version_id
+        )
+
+        version = self.snapshot_repository.next_version(
+            db, case_id, user_id, case_version_id
+        )
         snapshot = DashboardSnapshot(
             id=str(uuid.uuid4()),
             case_id=case_id,
+            case_version_id=case_version_id,
             user_id=user_id,
             version=version,
             status=FacetStatus.PENDING,
@@ -103,9 +121,18 @@ class OrchestratorService:
             raise
 
     def _get_or_process_extraction(
-        self, db: Session, case_id: str, force_reprocess: bool
+        self,
+        db: Session,
+        case_id: str,
+        force_reprocess: bool,
+        case_version_id: str | None = None,
     ) -> ClinicalExtraction:
-        extraction = self.extraction_repository.get_by_case_id(db, case_id)
+        if case_version_id:
+            extraction = self.extraction_repository.get_by_case_version_id(
+                db, case_version_id
+            )
+        else:
+            extraction = self.extraction_repository.get_by_case_id(db, case_id)
         if extraction and not force_reprocess:
             return extraction
 
@@ -113,7 +140,9 @@ class OrchestratorService:
         if not result.get("success"):
             raise ValueError(result.get("error") or "Processing failed")
 
-        extraction = self.extraction_repository.get_by_case_id(db, case_id)
+        extraction = self.extraction_repository.get_by_case_version_id(
+            db, case_version_id
+        ) if case_version_id else self.extraction_repository.get_by_case_id(db, case_id)
         if not extraction:
             raise ValueError("Extraction missing after processing")
         return extraction
@@ -216,6 +245,7 @@ class OrchestratorService:
             id=str(uuid.uuid4()),
             snapshot_id=snapshot.id,
             case_id=snapshot.case_id,
+            case_version_id=snapshot.case_version_id,
             user_id=user_id,
             facet_type=facet_type,
             status=FacetStatus.READY,

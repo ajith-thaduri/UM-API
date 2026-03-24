@@ -21,9 +21,10 @@ class CaseRepository(BaseRepository[Case]):
         Get case by ID, optionally filtered by user_id
         """
         from sqlalchemy.orm import selectinload, joinedload
+        from app.models.case_version import CaseVersion
         query = db.query(Case).filter(Case.id == id).options(
             selectinload(Case.files),
-            joinedload(Case.extraction)
+            joinedload(Case.live_version).joinedload(CaseVersion.clinical_extraction),
         )
         if user_id:
             query = query.filter(Case.user_id == user_id)
@@ -34,11 +35,12 @@ class CaseRepository(BaseRepository[Case]):
         Get case by case number for a specific user
         """
         from sqlalchemy.orm import selectinload, joinedload
+        from app.models.case_version import CaseVersion
         return db.query(Case).filter(
             and_(Case.case_number == case_number, Case.user_id == user_id)
         ).options(
             selectinload(Case.files),
-            joinedload(Case.extraction)
+            joinedload(Case.live_version).joinedload(CaseVersion.clinical_extraction),
         ).first()
 
     def get_by_status(
@@ -103,11 +105,12 @@ class CaseRepository(BaseRepository[Case]):
         Includes optimized eager loading.
         """
         from sqlalchemy.orm import selectinload, joinedload
+        from app.models.case_version import CaseVersion
         
         # Start with eager loading options
         query = db.query(Case).options(
             selectinload(Case.files),
-            joinedload(Case.extraction)
+            joinedload(Case.live_version).joinedload(CaseVersion.clinical_extraction),
         ).filter(Case.user_id == user_id)
 
         # Apply filters

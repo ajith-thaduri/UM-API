@@ -60,6 +60,9 @@ class CaseResponse(BaseModel):
     assigned_to: Optional[str] = None
     record_count: int
     page_count: int
+    live_version_id: Optional[str] = None
+    latest_version_number: int = 1
+    processing_version_id: Optional[str] = None
     # Review status from decision
     review_status: ReviewStatus = ReviewStatus.NOT_REVIEWED
     reviewed_by: Optional[str] = None

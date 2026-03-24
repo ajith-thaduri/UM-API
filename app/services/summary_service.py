@@ -27,6 +27,12 @@ logger = logging.getLogger(__name__)
 safe_logger = get_safe_logger(__name__)
 
 
+class CaseVersionSummaryError(RuntimeError):
+    """Case version pipeline must not use mock/template summaries; fail visibly instead."""
+
+    pass
+
+
 class SummaryService:
     """Service for generating UM-ready summaries using structured data only"""
 
@@ -133,7 +139,9 @@ class SummaryService:
         db: Optional[Session] = None,
         case_id: Optional[str] = None,
         user_id: Optional[str] = None,
-        document_chunks: Optional[List[str]] = None
+        document_chunks: Optional[List[str]] = None,
+        version_continuity_addon: str = "",
+        for_case_version_pipeline: bool = False,
     ) -> str:
         """
         Generate UM-ready 1-2 page summary using structured data only
@@ -213,7 +221,11 @@ class SummaryService:
                 # Step 3: Call Claude (Tier 2 LLM)
                 llm_service = self._get_tier2_llm_service(db, user_id)
                 if not llm_service.is_available():
-                    safe_logger.warning("Claude not available, falling back to template")
+                    safe_logger.warning("Claude not available for summary generation")
+                    if for_case_version_pipeline:
+                        raise CaseVersionSummaryError(
+                            "Tier 2 LLM is not available; cannot generate case version summary."
+                        )
                     return self._generate_mock_summary(
                         extracted_data, timeline, contradictions, patient_name, case_number
                     )
@@ -230,6 +242,16 @@ class SummaryService:
                 prompt += f"\n\nIMPORTANT: Represent the patient as {patient_token} and the case number as {case_no_token} throughout the summary. These tokens will be automatically restored to original values."
                 prompt += "\n\nPROVIDER-SPECIFIC GUIDANCE: Aim for 2500-3500 tokens total. Be comprehensive but concise."
                 prompt_with_rules = prompt + EXTRACTION_RULES
+
+                if version_continuity_addon:
+                    from app.services.version_merge_service import SECTION_STRUCTURE_CONTRACT
+
+                    prompt_with_rules += (
+                        "\n\n"
+                        + SECTION_STRUCTURE_CONTRACT
+                        + "\n\n"
+                        + version_continuity_addon
+                    )
                 
                 # Append raw document chunks as supplementary context (if available)
                 if variables.get("document_chunks_text") and variables["document_chunks_text"] != "No raw document chunks available.":
@@ -302,16 +324,22 @@ class SummaryService:
                 
             except PHILeakageError as e:
                 # Pre-flight validation failed - PHI detected in payload
-                # Fail-closed: return template summary (safe degradation)
                 safe_logger.error(f"PHI validation failed for case {case_id}: {e}")
-                safe_logger.info(f"Falling back to template summary (no PHI sent to Claude)")
+                if for_case_version_pipeline:
+                    raise CaseVersionSummaryError(
+                        f"PHI validation blocked Tier 2 summary for case version: {e}"
+                    ) from e
+                safe_logger.info("Falling back to template summary (no PHI sent to Claude)")
                 return self._generate_mock_summary(
                     extracted_data, timeline, contradictions, patient_name, case_number
                 )
-            
+
             except Exception as e:
-                # Unexpected error - fail safe
                 safe_logger.error(f"De-identification error for case {case_id}: {e}", exc_info=True)
+                if for_case_version_pipeline:
+                    raise CaseVersionSummaryError(
+                        f"Tier 2 summary preparation failed for case version: {e}"
+                    ) from e
                 return self._generate_mock_summary(
                     extracted_data, timeline, contradictions, patient_name, case_number
                 )
@@ -328,6 +356,10 @@ class SummaryService:
             )
 
             if not llm_service.is_available():
+                if for_case_version_pipeline:
+                    raise CaseVersionSummaryError(
+                        "Tier 2 LLM is not available; cannot generate case version summary (legacy path)."
+                    )
                 return self._generate_mock_summary(
                     extracted_data, timeline, contradictions, patient_name, case_number
                 )
@@ -343,6 +375,16 @@ class SummaryService:
                 from app.services.llm.claude_service import ClaudeService
                 prompt += "\n\nPROVIDER-SPECIFIC GUIDANCE: Aim for 2500-3500 tokens total. Be comprehensive but concise."
                 prompt_with_rules = prompt # Removed EXTRACTION_RULES which forced JSON
+
+                if version_continuity_addon:
+                    from app.services.version_merge_service import SECTION_STRUCTURE_CONTRACT
+
+                    prompt_with_rules += (
+                        "\n\n"
+                        + SECTION_STRUCTURE_CONTRACT
+                        + "\n\n"
+                        + version_continuity_addon
+                    )
 
                 response, usage = await llm_service.chat_completion(
                     messages=[{"role": "user", "content": prompt_with_rules}],
@@ -398,6 +440,10 @@ class SummaryService:
 
             except Exception as e:
                 logger.error(f"Summary generation error: {e}", exc_info=True)
+                if for_case_version_pipeline:
+                    raise CaseVersionSummaryError(
+                        f"Legacy-path summary generation failed for case version: {e}"
+                    ) from e
                 return self._generate_mock_summary(
                     extracted_data, timeline, contradictions, patient_name, case_number
                 )
@@ -412,7 +458,9 @@ class SummaryService:
         db: Optional[Session] = None,
         case_id: Optional[str] = None,
         user_id: Optional[str] = None,
-        document_chunks: Optional[List[str]] = None
+        document_chunks: Optional[List[str]] = None,
+        version_continuity_addon: str = "",
+        for_case_version_pipeline: bool = False,
     ) -> str:
         """
         Generate concise executive summary (5-10 bullet points) for PDFs and quick reference
@@ -481,10 +529,14 @@ class SummaryService:
                 # Step 3: Call Claude (Tier 2 LLM)
                 llm_service = self._get_tier2_llm_service(db, user_id)
                 if not llm_service.is_available():
+                    if for_case_version_pipeline:
+                        raise CaseVersionSummaryError(
+                            "Tier 2 LLM is not available; cannot generate case version executive summary."
+                        )
                     return self._generate_mock_executive_summary(
                         extracted_data, timeline, contradictions, patient_name, case_number
                     )
-                
+
                 prompt_id = "executive_summary_generation"
                 variables = {
                     "patient_name": patient_token,
@@ -517,6 +569,18 @@ class SummaryService:
                         prompt += "The following document chunks provide additional raw clinical context. Synthesize the summary using both the clinical data points above and these source chunks.\n"
                     for i, text in enumerate(chunks):
                         prompt += f"\n[Chunk {i+1}]\n{text}\n"
+
+                if version_continuity_addon:
+                    from app.services.version_merge_service import SECTION_STRUCTURE_CONTRACT
+
+                    prompt += (
+                        "\n\n"
+                        + SECTION_STRUCTURE_CONTRACT
+                        + "\n\n"
+                        + version_continuity_addon
+                        + "\n\nFor the executive summary: keep the same numbered bullet style as the prior version when possible; "
+                        "update bullets only where new documents change the story."
+                    )
                 
                 response, usage = await llm_service.chat_completion(
                     messages=[{"role": "user", "content": prompt}],
@@ -576,14 +640,22 @@ class SummaryService:
                 
             except Exception as e:
                 safe_logger.error(f"Executive summary Tier 2 failed for case {case_id}: {e}", exc_info=True)
+                if for_case_version_pipeline:
+                    raise CaseVersionSummaryError(
+                        f"Executive summary Tier 2 failed for case version: {e}"
+                    ) from e
                 return self._generate_mock_executive_summary(
                     extracted_data, timeline, contradictions, patient_name, case_number
                 )
-        
+
         # Fallback to legacy path (Tier 1) only if two-tier is DISABLED
         llm_service = self._get_llm_service(db, user_id)
-        
+
         if not llm_service.is_available():
+            if for_case_version_pipeline:
+                raise CaseVersionSummaryError(
+                    "LLM not available for case version executive summary (legacy path)."
+                )
             return self._generate_mock_executive_summary(
                 extracted_data, timeline, contradictions, patient_name, case_number
             )
@@ -689,6 +761,10 @@ class SummaryService:
 
         except Exception as e:
             logger.error(f"Executive summary generation error: {e}", exc_info=True)
+            if for_case_version_pipeline:
+                raise CaseVersionSummaryError(
+                    f"Executive summary generation failed for case version: {e}"
+                ) from e
             return self._generate_mock_executive_summary(
                 extracted_data, timeline, contradictions, patient_name, case_number
             )

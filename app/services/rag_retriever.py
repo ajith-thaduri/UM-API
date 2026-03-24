@@ -74,7 +74,8 @@ class RAGRetriever:
         case_id: str,
         base_top_k: int = 20,
         min_top_k: int = 20,
-        max_top_k: int = 100
+        max_top_k: int = 100,
+        case_version_id: Optional[str] = None,
     ) -> int:
         """
         Compute adaptive top_k based on document size
@@ -98,7 +99,7 @@ class RAGRetriever:
         """
         from app.repositories.chunk_repository import chunk_repository
         
-        total_chunks = chunk_repository.count_by_case(db, case_id)
+        total_chunks = chunk_repository.count_by_case(db, case_id, case_version_id=case_version_id)
         
         if total_chunks <= 50:
             # Small document: retrieve 50-100% of chunks
@@ -120,7 +121,8 @@ class RAGRetriever:
         case_id: str,
         user_id: str,
         top_k: Optional[int] = None,  # Final number of results after reranking (optional for adaptive)
-        use_adaptive: bool = True  # Enable adaptive top_k based on document size
+        use_adaptive: bool = True,  # Enable adaptive top_k based on document size
+        case_version_id: Optional[str] = None,
     ) -> List[RetrievedChunk]:
         """
         Retrieve relevant chunks for a query - all chunks, no section filtering
@@ -139,7 +141,9 @@ class RAGRetriever:
         """
         # Compute adaptive top_k if not specified
         if top_k is None or use_adaptive:
-            adaptive_k = self._compute_adaptive_top_k(db, case_id, base_top_k=top_k or 20)
+            adaptive_k = self._compute_adaptive_top_k(
+                db, case_id, base_top_k=top_k or 20, case_version_id=case_version_id
+            )
             if use_adaptive:
                 top_k = adaptive_k
                 logger.info(f"Using adaptive top_k={top_k} for case {case_id}")
@@ -155,7 +159,8 @@ class RAGRetriever:
             query_vector=query_embedding,
             case_id=case_id,
             user_id=user_id,
-            top_k=initial_top_k
+            top_k=initial_top_k,
+            case_version_id=case_version_id,
         )
         
         # Get full chunk details from database
@@ -292,7 +297,8 @@ class RAGRetriever:
     def retrieve_all_for_case(
         self,
         db: Session,
-        case_id: str
+        case_id: str,
+        case_version_id: Optional[str] = None,
     ) -> List[RetrievedChunk]:
         """
         Retrieve all chunks for a case (for full context operations)
@@ -304,8 +310,8 @@ class RAGRetriever:
         Returns:
             All chunks for the case
         """
-        db_chunks = chunk_repository.get_by_case_id(db, case_id)
-        
+        db_chunks = chunk_repository.get_by_case_id(db, case_id, case_version_id=case_version_id)
+
         return [
             RetrievedChunk(
                 chunk_id=chunk.id,
@@ -498,7 +504,9 @@ class RAGRetriever:
         query: Optional[str] = None,
         max_tokens: Optional[int] = None,
         ensure_file_diversity: bool = False,
-        use_adaptive_top_k: bool = True  # Enable adaptive top_k based on document size
+        use_adaptive_top_k: bool = True,  # Enable adaptive top_k based on document size
+        case_version_id: Optional[str] = None,
+        context_prefix: Optional[str] = None,
     ) -> RAGContext:
         """
         Build context from all chunks - section_types parameter is ignored
@@ -519,8 +527,12 @@ class RAGRetriever:
         """
         if query:
             # Compute adaptive top_k if enabled
-            adaptive_k = self._compute_adaptive_top_k(db, case_id, base_top_k=30) if use_adaptive_top_k else 30
-            
+            adaptive_k = (
+                self._compute_adaptive_top_k(db, case_id, base_top_k=30, case_version_id=case_version_id)
+                if use_adaptive_top_k
+                else 30
+            )
+
             # Use semantic search to get most relevant chunks
             all_chunks = self.retrieve_for_query(
                 db=db,
@@ -528,20 +540,29 @@ class RAGRetriever:
                 case_id=case_id,
                 user_id=user_id,
                 top_k=adaptive_k,
-                use_adaptive=use_adaptive_top_k
+                use_adaptive=use_adaptive_top_k,
+                case_version_id=case_version_id,
             )
         else:
             # Get all chunks for case
-            all_chunks = self.retrieve_all_for_case(db, case_id)
-        
+            all_chunks = self.retrieve_all_for_case(db, case_id, case_version_id=case_version_id)
+
         # Sort by score if query was used, otherwise by page number
         if query:
             all_chunks.sort(key=lambda x: x.score, reverse=True)
         else:
             all_chunks.sort(key=lambda x: (x.page_number, x.char_start))
-        
+
         # Pass ensure_file_diversity to build_context
-        return self.build_context(all_chunks, max_tokens, ensure_file_diversity=ensure_file_diversity)
+        ctx = self.build_context(all_chunks, max_tokens, ensure_file_diversity=ensure_file_diversity)
+        if context_prefix:
+            ctx = RAGContext(
+                chunks=ctx.chunks,
+                total_tokens=ctx.total_tokens,
+                formatted_context=context_prefix + "\n\n---\n\n" + ctx.formatted_context,
+                source_references=ctx.source_references,
+            )
+        return ctx
 
     def get_chunk_by_id(
         self,

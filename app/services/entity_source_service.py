@@ -33,6 +33,7 @@ class EntitySourceService:
         db: Session,
         case_id: str,
         user_id: str,
+        case_version_id: str,
         entity_type: str,
         entity_id: str,
         chunk_id: Optional[str] = None,
@@ -93,6 +94,7 @@ class EntitySourceService:
         entity_source = EntitySource(
             id=str(uuid.uuid4()),
             case_id=case_id,
+            case_version_id=case_version_id,
             user_id=user_id,
             entity_type=entity_type,
             entity_id=entity_id,
@@ -129,7 +131,8 @@ class EntitySourceService:
         sources_data: List[Dict],
         case_id: str,
         user_id: str,
-        commit: bool = True
+        case_version_id: str,
+        commit: bool = True,
     ) -> int:
         """
         Bulk create or update entity sources using production-safe pattern.
@@ -152,7 +155,9 @@ class EntitySourceService:
         
         # 1. Pre-fetch existing sources for this case to handle "Upsert" logic in memory
         try:
-            existing_sources = self.entity_source_repo.list_for_case(db, case_id, user_id)
+            existing_sources = self.entity_source_repo.list_for_case(
+                db, case_id, user_id, case_version_id=case_version_id
+            )
             # Create lookup map: (entity_type, entity_id, chunk_id) -> EntitySource object
             # Using chunk_id as part of key helps distinguish duplicate mentions
             existing_map = {}
@@ -194,6 +199,7 @@ class EntitySourceService:
                 new_rows.append({
                     "id": str(uuid.uuid4()),
                     "case_id": case_id,
+                    "case_version_id": case_version_id,
                     "user_id": user_id,
                     "entity_type": entity_type,
                     "entity_id": entity_id,
@@ -236,9 +242,10 @@ class EntitySourceService:
         db: Session,
         case_id: str,
         user_id: str,
+        case_version_id: str,
         extracted_data: Dict,
         extraction_sources: List[Dict],
-        file_lookup: Dict[str, str]  # file_id -> file_name
+        file_lookup: Dict[str, str],  # file_id -> file_name
     ) -> int:
         """
         Create entity sources from extraction results using optimized bulk processing.
@@ -395,7 +402,9 @@ class EntitySourceService:
         # Execute bulk creation
         if sources_to_create:
             logger.info(f"[SOURCE_LINKING] Bulk creating {len(sources_to_create)} entity sources")
-            return self.bulk_create_entity_sources(db, sources_to_create, case_id, user_id)
+            return self.bulk_create_entity_sources(
+                db, sources_to_create, case_id, user_id, case_version_id
+            )
         
         return 0
     
@@ -551,6 +560,7 @@ class EntitySourceService:
         db: Session,
         case_id: str,
         user_id: str,
+        case_version_id: str,
         entity_type: str,
         entity_id: str,
         chunk_id: Optional[str] = None,
@@ -582,6 +592,7 @@ class EntitySourceService:
                 db=db,
                 case_id=case_id,
                 user_id=user_id,
+                case_version_id=case_version_id,
                 entity_type=entity_type,
                 entity_id=entity_id,
                 chunk_id=chunk_id,

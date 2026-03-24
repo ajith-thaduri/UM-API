@@ -3,7 +3,15 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 
 from app.models.document_chunk import DocumentChunk, SectionType
+from app.models.case import Case
 from app.repositories.base import BaseRepository
+
+
+def _resolve_case_version_id(db: Session, case_id: str, case_version_id: Optional[str]) -> Optional[str]:
+    if case_version_id:
+        return case_version_id
+    case = db.query(Case).filter(Case.id == case_id).first()
+    return case.live_version_id if case else None
 
 
 class ChunkRepository(BaseRepository[DocumentChunk]):
@@ -18,14 +26,21 @@ class ChunkRepository(BaseRepository[DocumentChunk]):
             DocumentChunk.vector_id == vector_id
         ).first()
 
-    def get_by_case_id(self, db: Session, case_id: str) -> List[DocumentChunk]:
-        """Get all chunks for a case"""
-        return db.query(DocumentChunk).filter(
-            DocumentChunk.case_id == case_id
-        ).order_by(
+    def get_by_case_id(
+        self, db: Session, case_id: str, case_version_id: Optional[str] = None
+    ) -> List[DocumentChunk]:
+        """Get chunks for a case; scope to case_version_id or live version."""
+        vid = _resolve_case_version_id(db, case_id, case_version_id)
+        if not vid:
+            return []
+        q = db.query(DocumentChunk).filter(
+            DocumentChunk.case_id == case_id,
+            DocumentChunk.case_version_id == vid,
+        )
+        return q.order_by(
             DocumentChunk.file_id,
             DocumentChunk.page_number,
-            DocumentChunk.chunk_index
+            DocumentChunk.chunk_index,
         ).all()
 
     def get_by_file_id(self, db: Session, file_id: str) -> List[DocumentChunk]:
@@ -41,17 +56,27 @@ class ChunkRepository(BaseRepository[DocumentChunk]):
         self,
         db: Session,
         case_id: str,
-        section_type: SectionType
+        section_type: SectionType,
+        case_version_id: Optional[str] = None,
     ) -> List[DocumentChunk]:
-        """Get chunks by section type for a case"""
-        return db.query(DocumentChunk).filter(
-            DocumentChunk.case_id == case_id,
-            DocumentChunk.section_type == section_type
-        ).order_by(
-            DocumentChunk.file_id,
-            DocumentChunk.page_number,
-            DocumentChunk.chunk_index
-        ).all()
+        """Get chunks by section type for a case (live or explicit version)."""
+        vid = _resolve_case_version_id(db, case_id, case_version_id)
+        if not vid:
+            return []
+        return (
+            db.query(DocumentChunk)
+            .filter(
+                DocumentChunk.case_id == case_id,
+                DocumentChunk.case_version_id == vid,
+                DocumentChunk.section_type == section_type,
+            )
+            .order_by(
+                DocumentChunk.file_id,
+                DocumentChunk.page_number,
+                DocumentChunk.chunk_index,
+            )
+            .all()
+        )
 
     def get_by_page(
         self,
@@ -78,18 +103,31 @@ class ChunkRepository(BaseRepository[DocumentChunk]):
         ).all()
 
     def delete_by_case_id(self, db: Session, case_id: str) -> int:
-        """Delete all chunks for a case"""
+        """Delete all chunks for a case (all versions)."""
+        count = db.query(DocumentChunk).filter(DocumentChunk.case_id == case_id).delete()
+        db.commit()
+        return count
+
+    def delete_by_case_version_id(self, db: Session, case_version_id: str) -> int:
         count = db.query(DocumentChunk).filter(
-            DocumentChunk.case_id == case_id
+            DocumentChunk.case_version_id == case_version_id
         ).delete()
         db.commit()
         return count
-    
-    def count_by_case(self, db: Session, case_id: str) -> int:
-        """Count total chunks for a case"""
-        return db.query(DocumentChunk).filter(
-            DocumentChunk.case_id == case_id
-        ).count()
+
+    def count_by_case(self, db: Session, case_id: str, case_version_id: Optional[str] = None) -> int:
+        """Count chunks for live version (or explicit case_version_id)."""
+        vid = _resolve_case_version_id(db, case_id, case_version_id)
+        if not vid:
+            return 0
+        return (
+            db.query(DocumentChunk)
+            .filter(
+                DocumentChunk.case_id == case_id,
+                DocumentChunk.case_version_id == vid,
+            )
+            .count()
+        )
 
     def delete_by_file_id(self, db: Session, file_id: str) -> int:
         """Delete all chunks for a file"""
@@ -99,23 +137,25 @@ class ChunkRepository(BaseRepository[DocumentChunk]):
         db.commit()
         return count
 
-    def count_by_case(self, db: Session, case_id: str) -> int:
-        """Count chunks for a case"""
-        return db.query(DocumentChunk).filter(
-            DocumentChunk.case_id == case_id
-        ).count()
-
     def count_by_section(
         self,
         db: Session,
         case_id: str,
-        section_type: SectionType
+        section_type: SectionType,
+        case_version_id: Optional[str] = None,
     ) -> int:
-        """Count chunks by section type for a case"""
-        return db.query(DocumentChunk).filter(
-            DocumentChunk.case_id == case_id,
-            DocumentChunk.section_type == section_type
-        ).count()
+        vid = _resolve_case_version_id(db, case_id, case_version_id)
+        if not vid:
+            return 0
+        return (
+            db.query(DocumentChunk)
+            .filter(
+                DocumentChunk.case_id == case_id,
+                DocumentChunk.case_version_id == vid,
+                DocumentChunk.section_type == section_type,
+            )
+            .count()
+        )
 
     def bulk_create(self, db: Session, chunks: List[DocumentChunk], batch_size: int = 100) -> int:
         """
@@ -150,6 +190,7 @@ class ChunkRepository(BaseRepository[DocumentChunk]):
             c_dict = {
                 "id": chunk.id,
                 "case_id": chunk.case_id,
+                "case_version_id": chunk.case_version_id,
                 "user_id": chunk.user_id,
                 "file_id": chunk.file_id,
                 "vector_id": chunk.vector_id,

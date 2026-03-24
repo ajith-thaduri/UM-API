@@ -13,7 +13,7 @@ import os
 import tempfile
 from typing import Any, Dict
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 
 from app.api.endpoints.auth import get_current_user
 from app.models.user import User
@@ -28,7 +28,7 @@ MAX_UPLOAD_SIZE_MB = 50
 @router.post("/analyze-pdf")
 async def analyze_pdf(
     file: UploadFile = File(...),
-    engine: str | None = File(None),
+    engine: str | None = Form(None),
     current_user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
     """

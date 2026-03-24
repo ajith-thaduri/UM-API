@@ -29,14 +29,17 @@ class EntitySourceRepository(BaseRepository[EntitySource]):
         return query.first()
     
     def list_for_case(
-        self, 
-        db: Session, 
-        case_id: str, 
+        self,
+        db: Session,
+        case_id: str,
         user_id: Optional[str] = None,
-        entity_type: Optional[str] = None
+        entity_type: Optional[str] = None,
+        case_version_id: Optional[str] = None,
     ) -> List[EntitySource]:
-        """List all entity sources for a case."""
+        """List entity sources for a case, optionally scoped to a processing version."""
         query = db.query(EntitySource).filter(EntitySource.case_id == case_id)
+        if case_version_id:
+            query = query.filter(EntitySource.case_version_id == case_version_id)
         if user_id:
             query = query.filter(EntitySource.user_id == user_id)
         if entity_type:

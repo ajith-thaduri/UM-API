@@ -27,6 +27,9 @@ class PrivacyVault(Base):
     case_id = Column(
         String, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    case_version_id = Column(
+        String, ForeignKey("case_versions.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     user_id = Column(
         String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )

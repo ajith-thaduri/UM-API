@@ -39,6 +39,7 @@ def _serialize_snapshot(snapshot) -> DashboardResponse:
 @router.get("/dashboard/{case_id}", response_model=DashboardResponse)
 async def get_dashboard(
     case_id: str,
+    case_version_id: str | None = Query(None, description="Processing version; defaults to case live version"),
     db: Session = Depends(get_db),
     snapshot_repository: DashboardSnapshotRepository = Depends(
         get_dashboard_snapshot_repository
@@ -46,7 +47,17 @@ async def get_dashboard(
     facet_repository: FacetRepository = Depends(get_facet_repository),
     current_user: User = Depends(get_current_user),
 ):
-    snapshot = snapshot_repository.get_latest_for_case(db, case_id, user_id=current_user.id)
+    from app.repositories.case_repository import CaseRepository
+
+    case_repo = CaseRepository()
+    case_row = case_repo.get_by_id(db, case_id, user_id=current_user.id)
+    vid = case_version_id or (case_row.live_version_id if case_row else None)
+    if not vid:
+        raise HTTPException(status_code=404, detail="Case or version not found")
+
+    snapshot = snapshot_repository.get_latest_for_case(
+        db, case_id, user_id=current_user.id, case_version_id=vid
+    )
     if not snapshot:
         # Check if case is ready - if so, auto-build the dashboard
         from app.repositories.case_repository import CaseRepository
@@ -61,7 +72,13 @@ async def get_dashboard(
             try:
                 logger.info(f"Auto-building dashboard for ready case {case_id}")
                 orchestrator = build_orchestrator_service()
-                snapshot = orchestrator.build_dashboard(db=db, case_id=case_id, user_id=current_user.id, force_reprocess=False)
+                snapshot = orchestrator.build_dashboard(
+                    db=db,
+                    case_id=case_id,
+                    user_id=current_user.id,
+                    force_reprocess=False,
+                    case_version_id=vid,
+                )
                 logger.info(f"Successfully auto-built dashboard for case {case_id}")
             except Exception as e:
                 logger.warning(f"Failed to auto-build dashboard for case {case_id}: {e}", exc_info=True)
@@ -79,6 +96,7 @@ async def build_dashboard(
     case_id: str,
     facet: FacetType | None = Query(default=None),
     force_reprocess: bool = Query(default=False),
+    case_version_id: str | None = Query(None, description="Defaults to live version"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -92,7 +110,12 @@ async def build_dashboard(
     
     orchestrator = build_orchestrator_service()
     snapshot = orchestrator.build_dashboard(
-        db=db, case_id=case_id, user_id=current_user.id, facet=facet, force_reprocess=force_reprocess
+        db=db,
+        case_id=case_id,
+        user_id=current_user.id,
+        facet=facet,
+        force_reprocess=force_reprocess,
+        case_version_id=case_version_id,
     )
     return _serialize_snapshot(snapshot)
 
@@ -101,6 +124,7 @@ async def build_dashboard(
 async def rerun_facet(
     case_id: str,
     facet_type: FacetType,
+    case_version_id: str | None = Query(None, description="Defaults to live version"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -113,7 +137,14 @@ async def rerun_facet(
         raise HTTPException(status_code=404, detail="Case not found")
     
     orchestrator = build_orchestrator_service()
-    snapshot = orchestrator.build_dashboard(db=db, case_id=case_id, user_id=current_user.id, facet=facet_type, force_reprocess=False)
+    snapshot = orchestrator.build_dashboard(
+        db=db,
+        case_id=case_id,
+        user_id=current_user.id,
+        facet=facet_type,
+        force_reprocess=False,
+        case_version_id=case_version_id,
+    )
     return _serialize_snapshot(snapshot)
 
 
@@ -122,6 +153,7 @@ async def get_facet_source(
     case_id: str,
     facet_type: FacetType,
     item_id: str,
+    case_version_id: str | None = Query(None, description="Defaults to live version"),
     db: Session = Depends(get_db),
     source_link_repository: SourceLinkRepository = Depends(get_source_link_repository),
     extraction_repository: ExtractionRepository = Depends(get_extraction_repository),
@@ -134,8 +166,13 @@ async def get_facet_source(
     case = case_repo.get_by_id(db, case_id, user_id=current_user.id)
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
-    
-    links = source_link_repository.list_for_case(db, case_id, user_id=current_user.id)
+    vid = case_version_id or case.live_version_id
+    if not vid:
+        raise HTTPException(status_code=404, detail="Case or version not found")
+
+    links = source_link_repository.list_for_case_version(
+        db, case_id, user_id=current_user.id, case_version_id=vid
+    )
     # Try exact match
     link = next((l for l in links if l.item_id == item_id), None)
     if link:
@@ -150,7 +187,9 @@ async def get_facet_source(
         }
 
     # Fallback: derive from extraction source mapping
-    extraction = extraction_repository.get_by_case_id(db, case_id, user_id=current_user.id)
+    extraction = extraction_repository.get_by_case_id_and_version(
+        db, case_id, vid, user_id=current_user.id
+    )
     if not extraction or not extraction.source_mapping:
         raise HTTPException(status_code=404, detail="Source not found")
 

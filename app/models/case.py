@@ -62,16 +62,33 @@ class Case(Base):
     reviewed_at = Column(DateTime(timezone=True), nullable=True)
     reviewed_by = Column(String, nullable=True)
     
+    # Versioning: live = what end users see by default; processing = in-flight pipeline
+    live_version_id = Column(String, ForeignKey("case_versions.id", ondelete="SET NULL"), nullable=True, index=True)
+    latest_version_number = Column(Integer, nullable=False, default=1)
+    processing_version_id = Column(
+        String, ForeignKey("case_versions.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+
     # Performance indexes
     __table_args__ = (
-        Index('idx_case_user_status', 'user_id', 'status'),  # Composite index for user case queries
-        Index('idx_case_status_created', 'status', 'uploaded_at'),  # For filtering and sorting
-        Index('idx_case_case_number_user', 'case_number', 'user_id'),  # For case number lookups
+        Index('idx_case_user_status', 'user_id', 'status'),
+        Index('idx_case_status_created', 'status', 'uploaded_at'),
+        Index('idx_case_case_number_user', 'case_number', 'user_id'),
+        Index('idx_case_live_version', 'live_version_id'),
     )
-    
+
     # Relationships
     files = relationship("CaseFile", back_populates="case", order_by="CaseFile.file_order", cascade="all, delete-orphan")
-    extraction = relationship("ClinicalExtraction", back_populates="case", uselist=False)
+    versions = relationship(
+        "CaseVersion",
+        back_populates="case",
+        foreign_keys="CaseVersion.case_id",
+        cascade="all, delete-orphan",
+    )
+    live_version = relationship("CaseVersion", foreign_keys=[live_version_id], post_update=True)
+    processing_version = relationship("CaseVersion", foreign_keys=[processing_version_id], post_update=True)
+    # Extractions are per CaseVersion; resolve via live_version or explicit version_id in repositories.
+    extractions = relationship("ClinicalExtraction", back_populates="case", foreign_keys="ClinicalExtraction.case_id")
     user = relationship("User", foreign_keys=[user_id])
     decision = relationship("Decision", back_populates="case", uselist=False)
     notes = relationship("CaseNote", back_populates="case", order_by="CaseNote.created_at.desc()")

@@ -86,9 +86,11 @@ async def close_arq_pool() -> None:
         logger.info("ARQ pool closed")
 
 
-async def enqueue_case_processing(case_id: str, user_id: str) -> Optional[str]:
+async def enqueue_case_processing(
+    case_id: str, user_id: str, case_version_id: str
+) -> Optional[str]:
     """
-    Enqueue the first job of the case pipeline (J1). UM-Jobs workers pick it up.
+    Enqueue J1 for a specific CaseVersion. UM-Jobs workers pick it up.
     Returns job_id if enqueued, None if Redis/ARQ unavailable.
     """
     try:
@@ -97,6 +99,7 @@ async def enqueue_case_processing(case_id: str, user_id: str) -> Optional[str]:
             JOB_START_CASE,
             case_id=case_id,
             user_id=user_id,
+            case_version_id=case_version_id,
             _queue_name=TIER1_QUEUE,
         )
         return job.job_id if job else None

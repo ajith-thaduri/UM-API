@@ -29,3 +29,17 @@ class SourceLinkRepository(BaseRepository[SourceLink]):
             .all()
         )
 
+    def list_for_case_version(
+        self, db: Session, case_id: str, user_id: str, case_version_id: str
+    ) -> List[SourceLink]:
+        return (
+            db.query(SourceLink)
+            .filter(
+                SourceLink.case_id == case_id,
+                SourceLink.user_id == user_id,
+                SourceLink.case_version_id == case_version_id,
+            )
+            .order_by(SourceLink.created_at.desc())
+            .all()
+        )
+

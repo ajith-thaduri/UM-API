@@ -82,6 +82,7 @@ class SourceLinkService:
             link = SourceLink(
                 id=str(uuid.uuid4()),
                 case_id=facet.case_id,
+                case_version_id=facet.case_version_id,
                 user_id=facet.user_id,
                 facet_id=facet.id,
                 item_id=item_id,

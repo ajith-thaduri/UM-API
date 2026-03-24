@@ -164,7 +164,9 @@ class ClinicalAgent:
         prompt_id: str,
         source_type: str,
         operation_type: str,
-        default_return: Dict[str, Any]
+        default_return: Dict[str, Any],
+        case_version_id: Optional[str] = None,
+        context_prefix: Optional[str] = None,
     ) -> ExtractionResult:
         """Generic extraction method to reduce duplication"""
         context = rag_retriever.build_section_context(
@@ -172,7 +174,9 @@ class ClinicalAgent:
             case_id=case_id,
             user_id=user_id,
             section_types=[],  # Ignored
-            query=query
+            query=query,
+            case_version_id=case_version_id,
+            context_prefix=context_prefix,
         )
 
         if not context.chunks:
@@ -206,7 +210,9 @@ class ClinicalAgent:
         db: Session,
         case_id: str,
         user_id: str,
-        fallback_text: Optional[str] = None
+        fallback_text: Optional[str] = None,
+        case_version_id: Optional[str] = None,
+        context_prefix: Optional[str] = None,
     ) -> ExtractionResult:
         """
         Extract all clinical information using parallel RAG-enhanced extraction calls.
@@ -260,7 +266,9 @@ Admission information, chief complaint, and hospital course.
             section_types=[],
             query=comprehensive_query,
             max_tokens=20000,
-            ensure_file_diversity=True
+            ensure_file_diversity=True,
+            case_version_id=case_version_id,
+            context_prefix=context_prefix,
         )
 
         # History context
@@ -270,7 +278,9 @@ Admission information, chief complaint, and hospital course.
             user_id=user_id,
             section_types=[],
             query="chief complaint history of present illness past medical history past surgical history family history social history",
-            max_tokens=6000
+            max_tokens=6000,
+            case_version_id=case_version_id,
+            context_prefix=context_prefix,
         )
 
         # Social factors context
@@ -280,7 +290,9 @@ Admission information, chief complaint, and hospital course.
             user_id=user_id,
             section_types=[],
             query="social work case management discharge planning housing caregiver availability cognition mental status placement barriers discharge barriers",
-            max_tokens=6000
+            max_tokens=6000,
+            case_version_id=case_version_id,
+            context_prefix=context_prefix,
         )
 
         # Therapy context
@@ -290,7 +302,9 @@ Admission information, chief complaint, and hospital course.
             user_id=user_id,
             section_types=[],
             query="physical therapy occupational therapy speech therapy functional status assessment mobility ambulation ADL",
-            max_tokens=6000
+            max_tokens=6000,
+            case_version_id=case_version_id,
+            context_prefix=context_prefix,
         )
 
         if not context.chunks and not history_context.chunks and not social_factors_context.chunks and not therapy_context.chunks:

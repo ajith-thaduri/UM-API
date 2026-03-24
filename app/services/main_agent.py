@@ -2,7 +2,7 @@
 
 import json
 import logging
-from typing import Dict, List, Optional, Any
+from typing import Any, AsyncIterator, Dict, List, Optional
 from dataclasses import dataclass, field
 from datetime import datetime
 from sqlalchemy.orm import Session
@@ -27,6 +27,7 @@ class ConversationMessage:
     content: str
     timestamp: datetime = field(default_factory=datetime.utcnow)
     sources: List[Dict[str, Any]] = field(default_factory=list)
+    agent_metadata: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -37,6 +38,13 @@ class FollowUpResponse:
     chunks_used: List[str]
     confidence: float
     suggested_actions: List[str] = field(default_factory=list)
+    trace_steps: List[Dict[str, Any]] = field(default_factory=list)
+    context_summary: Optional[str] = None
+    active_version_summary: Optional[Dict[str, Any]] = None
+    used_artifacts: List[str] = field(default_factory=list)
+    structured_blocks: Optional[Dict[str, Any]] = None
+    resolved_intent: Optional[str] = None
+    show_trace: bool = True
 
 
 class MainAgent:
@@ -66,7 +74,8 @@ class MainAgent:
         case_id: str,
         question: str,
         user_id: str,
-        include_dashboard_context: bool = True
+        include_dashboard_context: bool = True,
+        case_version_id: Optional[str] = None,
     ) -> FollowUpResponse:
         """
         Answer a follow-up question about a case using RAG and dashboard context.
@@ -85,17 +94,8 @@ class MainAgent:
             FollowUpResponse with answer and sources
         """
         # Get conversation history from database
-        history = self._get_conversation_history(db, case_id, user_id)
-        
-        # Get dashboard context if requested
-        dashboard_context = ""
-        if include_dashboard_context:
-            dashboard_context = self._get_dashboard_context(db, case_id)
-        
-        # Retrieve relevant chunks using RAG
-        rag_context = self._retrieve_relevant_context(db, case_id, question, user_id)
-        
-        # Render the prompt
+        history = self._get_conversation_history(db, case_id, user_id, case_version_id)
+
         history_text = ""
         if history:
             history_parts = []
@@ -104,39 +104,149 @@ class MainAgent:
                 history_parts.append(f"{role}: {msg.content}")
             history_text = "\n".join(history_parts)
 
-        variables = {
-            "question": question,
-            "history_text": history_text or "No previous conversation",
-            "dashboard_context": dashboard_context,
-            "formatted_context": rag_context.formatted_context if rag_context else ""
+        from app.services.case_agent_service import run_case_agent_turn
+
+        async def _llm_case_agent(
+            prompt: str,
+            prompt_id: Optional[str] = None,
+            db: Optional[Session] = None,
+            user_id: Optional[str] = None,
+            case_id: Optional[str] = None,
+            system_message_override: Optional[str] = None,
+        ) -> tuple[str, float]:
+            return await self._get_llm_response(
+                prompt,
+                prompt_id=prompt_id,
+                db=db,
+                user_id=user_id,
+                case_id=case_id,
+                system_message_override=system_message_override,
+            )
+
+        result = await run_case_agent_turn(
+            db=db,
+            case_id=case_id,
+            user_id=user_id,
+            question=question,
+            history_text=history_text,
+            include_dashboard_context=include_dashboard_context,
+            case_version_id=case_version_id,
+            llm_answer_fn=_llm_case_agent,
+        )
+
+        agent_metadata = {
+            "trace_steps": result.trace_steps,
+            "resolved_intent": result.resolved_intent,
+            "used_artifacts": result.used_artifacts,
+            "context_summary": result.context_summary,
+            "active_version_summary": result.active_version_summary,
+            "structured_blocks": result.structured_blocks,
         }
 
-        if rag_context and rag_context.formatted_context:
-            prompt_id = "rag_chat_with_context"
-        else:
-            prompt_id = "rag_chat_without_context"
+        self._add_to_history(db, case_id, user_id, "user", question, case_version_id=case_version_id)
+        self._add_to_history(
+            db,
+            case_id,
+            user_id,
+            "assistant",
+            result.answer,
+            result.sources,
+            case_version_id=case_version_id,
+            agent_metadata=agent_metadata,
+        )
 
-        prompt = prompt_service.render_prompt(prompt_id, variables)
-        
-        # Get answer from LLM
-        answer, confidence = await self._get_llm_response(prompt, prompt_id=prompt_id, db=db, user_id=user_id, case_id=case_id)
-        
-        # Extract suggested actions
-        suggested_actions = self._extract_suggested_actions(answer, question)
-        
-        # Build sources list
-        sources = self._build_sources_from_context(rag_context)
-        
-        # Store in conversation history
-        self._add_to_history(db, case_id, user_id, "user", question)
-        self._add_to_history(db, case_id, user_id, "assistant", answer, sources)
-        
         return FollowUpResponse(
-            answer=answer,
-            sources=sources,
-            chunks_used=[c.chunk_id for c in rag_context.chunks] if rag_context else [],
-            confidence=confidence,
-            suggested_actions=suggested_actions
+            answer=result.answer,
+            sources=result.sources,
+            chunks_used=result.chunks_used,
+            confidence=result.confidence,
+            suggested_actions=result.suggested_actions,
+            trace_steps=result.trace_steps,
+            context_summary=result.context_summary,
+            active_version_summary=result.active_version_summary,
+            used_artifacts=result.used_artifacts,
+            structured_blocks=result.structured_blocks,
+            resolved_intent=result.resolved_intent,
+            show_trace=result.show_trace,
+        )
+
+    async def stream_follow_up_question(
+        self,
+        db: Session,
+        case_id: str,
+        question: str,
+        user_id: str,
+        include_dashboard_context: bool = True,
+        case_version_id: Optional[str] = None,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """
+        Stream LangGraph trace deltas (NDJSON) then a single ``final`` event.
+        Persists user + assistant messages once after the final event (same as non-stream).
+        """
+        from app.services.case_agent_graph import astream_case_agent_graph
+
+        history = self._get_conversation_history(db, case_id, user_id, case_version_id)
+        history_text = ""
+        if history:
+            history_parts = []
+            for msg in history[-5:]:
+                role = "User" if msg.role == "user" else "Assistant"
+                history_parts.append(f"{role}: {msg.content}")
+            history_text = "\n".join(history_parts)
+
+        async def _llm_case_agent(
+            prompt: str,
+            prompt_id: Optional[str] = None,
+            db: Optional[Session] = None,
+            user_id: Optional[str] = None,
+            case_id: Optional[str] = None,
+            system_message_override: Optional[str] = None,
+        ) -> tuple[str, float]:
+            return await self._get_llm_response(
+                prompt,
+                prompt_id=prompt_id,
+                db=db,
+                user_id=user_id,
+                case_id=case_id,
+                system_message_override=system_message_override,
+            )
+
+        final_event: Optional[Dict[str, Any]] = None
+        async for event in astream_case_agent_graph(
+            db=db,
+            case_id=case_id,
+            user_id=user_id,
+            question=question,
+            history_text=history_text,
+            include_dashboard_context=include_dashboard_context,
+            case_version_id=case_version_id,
+            llm_answer_fn=_llm_case_agent,
+        ):
+            if event.get("type") == "final":
+                final_event = event
+            yield event
+
+        if not final_event:
+            return
+
+        agent_metadata = {
+            "trace_steps": final_event.get("trace_steps") or [],
+            "resolved_intent": final_event.get("resolved_intent"),
+            "used_artifacts": final_event.get("used_artifacts") or [],
+            "context_summary": final_event.get("context_summary"),
+            "active_version_summary": final_event.get("active_version_summary"),
+            "structured_blocks": final_event.get("structured_blocks"),
+        }
+        self._add_to_history(db, case_id, user_id, "user", question, case_version_id=case_version_id)
+        self._add_to_history(
+            db,
+            case_id,
+            user_id,
+            "assistant",
+            final_event.get("answer") or "",
+            final_event.get("sources") or [],
+            case_version_id=case_version_id,
+            agent_metadata=agent_metadata,
         )
 
     def rerun_agent(
@@ -144,7 +254,9 @@ class MainAgent:
         db: Session,
         case_id: str,
         facet_type: FacetType,
-        query_refinement: Optional[str] = None
+        query_refinement: Optional[str] = None,
+        user_id: Optional[str] = None,
+        case_version_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Rerun a specific agent with optional query refinement
@@ -162,13 +274,22 @@ class MainAgent:
         from app.services.orchestrator_service import build_orchestrator_service
         
         orchestrator = build_orchestrator_service()
-        
-        # Rerun the specific facet
+        from app.repositories.case_repository import CaseRepository
+
+        cr = CaseRepository()
+        case_row = cr.get_by_id(db, case_id, user_id=user_id) if user_id else cr.get_by_id(db, case_id)
+        uid = user_id or (case_row.user_id if case_row else None)
+        if not uid:
+            raise ValueError("User context required to rerun agent")
+        vid = case_version_id or (case_row.live_version_id if case_row else None)
+
         snapshot = orchestrator.build_dashboard(
             db=db,
             case_id=case_id,
+            user_id=uid,
             facet=facet_type,
-            force_reprocess=False
+            force_reprocess=False,
+            case_version_id=vid,
         )
         
         return {
@@ -178,29 +299,56 @@ class MainAgent:
             "message": f"Successfully reran {facet_type.value} agent"
         }
 
-    def get_conversation_history(self, db: Session, case_id: str, user_id: str) -> List[Dict[str, Any]]:
+    def get_conversation_history(
+        self,
+        db: Session,
+        case_id: str,
+        user_id: str,
+        case_version_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         """Get conversation history for a case from database"""
-        history = self._get_conversation_history(db, case_id, user_id)
+        history = self._get_conversation_history(db, case_id, user_id, case_version_id)
         return [
             {
                 "role": msg.role,
                 "content": msg.content,
                 "timestamp": msg.timestamp.isoformat(),
-                "sources": msg.sources
+                "sources": msg.sources,
+                "agent_metadata": msg.agent_metadata,
             }
             for msg in history
         ]
 
-    def clear_conversation_history(self, db: Session, case_id: str, user_id: str) -> None:
+    def clear_conversation_history(
+        self,
+        db: Session,
+        case_id: str,
+        user_id: str,
+        case_version_id: Optional[str] = None,
+    ) -> None:
         """Clear conversation history for a case from database"""
         from app.repositories.conversation_repository import conversation_repository
-        conversation_repository.clear_conversation(db, case_id, user_id)
+        conversation_repository.clear_conversation(
+            db, case_id, user_id, case_version_id=case_version_id
+        )
         # Also clear cache
-        cache_key = f"{case_id}:{user_id}"
+        cache_key = self._conversation_cache_key(case_id, user_id, case_version_id)
         if cache_key in self._conversations_cache:
             del self._conversations_cache[cache_key]
 
-    def _get_conversation_history(self, db: Session, case_id: str, user_id: str) -> List[ConversationMessage]:
+    def _conversation_cache_key(
+        self, case_id: str, user_id: str, case_version_id: Optional[str]
+    ) -> str:
+        v = case_version_id or "live"
+        return f"{case_id}:{user_id}:{v}"
+
+    def _get_conversation_history(
+        self,
+        db: Session,
+        case_id: str,
+        user_id: str,
+        case_version_id: Optional[str] = None,
+    ) -> List[ConversationMessage]:
         """Get conversation history for a case from database"""
         from app.repositories.conversation_repository import conversation_repository
         from app.core.constants import MAX_HISTORY_MESSAGES
@@ -211,7 +359,8 @@ class MainAgent:
                 db=db,
                 case_id=case_id,
                 user_id=user_id,
-                limit=MAX_HISTORY_MESSAGES
+                limit=MAX_HISTORY_MESSAGES,
+                case_version_id=case_version_id,
             )
             
             # Convert database messages to ConversationMessage dataclass
@@ -221,18 +370,19 @@ class MainAgent:
                     role=db_msg.role,
                     content=db_msg.content,
                     timestamp=db_msg.created_at,
-                    sources=db_msg.sources or []
+                    sources=db_msg.sources or [],
+                    agent_metadata=getattr(db_msg, "agent_metadata", None),
                 ))
             
             # Update cache
-            cache_key = f"{case_id}:{user_id}"
+            cache_key = self._conversation_cache_key(case_id, user_id, case_version_id)
             self._conversations_cache[cache_key] = history
             
             return history
         except Exception as e:
             logger.warning(f"Failed to load conversation history from database, using cache: {e}")
             # Fallback to cache
-            cache_key = f"{case_id}:{user_id}"
+            cache_key = self._conversation_cache_key(case_id, user_id, case_version_id)
             return self._conversations_cache.get(cache_key, [])
 
     def _add_to_history(
@@ -242,7 +392,9 @@ class MainAgent:
         user_id: str,
         role: str,
         content: str,
-        sources: List[Dict[str, Any]] = None
+        sources: List[Dict[str, Any]] = None,
+        case_version_id: Optional[str] = None,
+        agent_metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Add a message to conversation history in database"""
         from app.repositories.conversation_repository import conversation_repository
@@ -255,11 +407,13 @@ class MainAgent:
                 user_id=user_id,
                 role=role,
                 content=content,
-                sources=sources
+                sources=sources,
+                case_version_id=case_version_id,
+                agent_metadata=agent_metadata,
             )
             
             # Also update cache for quick access
-            cache_key = f"{case_id}:{user_id}"
+            cache_key = self._conversation_cache_key(case_id, user_id, case_version_id)
             if cache_key not in self._conversations_cache:
                 self._conversations_cache[cache_key] = []
             
@@ -267,7 +421,8 @@ class MainAgent:
                 role=role,
                 content=content,
                 timestamp=datetime.utcnow(),
-                sources=sources or []
+                sources=sources or [],
+                agent_metadata=agent_metadata,
             ))
             
             # Keep only last max_history messages in cache
@@ -276,22 +431,30 @@ class MainAgent:
         except Exception as e:
             logger.warning(f"Failed to save conversation to database, using cache only: {e}")
             # Fallback to cache only
-            cache_key = f"{case_id}:{user_id}"
+            cache_key = self._conversation_cache_key(case_id, user_id, case_version_id)
             if cache_key not in self._conversations_cache:
                 self._conversations_cache[cache_key] = []
             self._conversations_cache[cache_key].append(ConversationMessage(
                 role=role,
                 content=content,
                 timestamp=datetime.utcnow(),
-                sources=sources or []
+                sources=sources or [],
+                agent_metadata=agent_metadata,
             ))
             if len(self._conversations_cache[cache_key]) > self._max_history:
                 self._conversations_cache[cache_key] = self._conversations_cache[cache_key][-self._max_history:]
 
-    def _get_dashboard_context(self, db: Session, case_id: str) -> str:
+    def _get_dashboard_context(
+        self,
+        db: Session,
+        case_id: str,
+        user_id: str,
+        case_version_id: Optional[str] = None,
+    ) -> str:
         """Get current dashboard state as context"""
-        # Get extraction data
-        extraction = extraction_repository.get_by_case_id(db, case_id)
+        extraction = extraction_repository.get_by_case_id_and_version(
+            db, case_id, case_version_id, user_id=user_id
+        )
         if not extraction:
             return "No clinical extraction available for this case."
         
@@ -354,7 +517,8 @@ class MainAgent:
         db: Session,
         case_id: str,
         question: str,
-        user_id: str
+        user_id: str,
+        case_version_id: Optional[str] = None,
     ) -> Optional[RAGContext]:
         """
         Retrieve relevant chunks for the question from case documents only.
@@ -369,7 +533,8 @@ class MainAgent:
                 query=question,
                 case_id=case_id,
                 user_id=user_id,
-                top_k=8
+                top_k=8,
+                case_version_id=case_version_id,
             )
             
             if not chunks:
@@ -388,7 +553,8 @@ class MainAgent:
         prompt_id: Optional[str] = None,
         db: Optional[Session] = None,
         user_id: Optional[str] = None,
-        case_id: Optional[str] = None
+        case_id: Optional[str] = None,
+        system_message_override: Optional[str] = None,
     ) -> tuple[str, float]:
         """Get response from LLM with usage tracking"""
         llm_service = self._get_llm_service(db, user_id)
@@ -397,8 +563,8 @@ class MainAgent:
             return "I'm unable to process your question at this time. Please ensure the LLM API key is configured.", 0.0
         
         # Get system message from prompt service
-        system_message = None
-        if prompt_id:
+        system_message = system_message_override
+        if not system_message and prompt_id:
             system_message = prompt_service.get_system_message(prompt_id)
             
         if not system_message:
@@ -457,7 +623,7 @@ class MainAgent:
                         total_tokens=usage.get("total_tokens", 0),
                         case_id=case_id,
                         extra_metadata={
-                            "operation": "rag_chat",
+                            "operation": "case_agent" if prompt_id == "case_agent_answer" else "rag_chat",
                             "prompt_id": prompt_id
                         }
                     )

@@ -1,11 +1,11 @@
 """Cases API endpoints"""
 
-from typing import List
+from typing import List, Optional
 import uuid
 import logging
 import shutil
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks, Query
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -23,9 +23,15 @@ from app.models.user import User
 logger = logging.getLogger(__name__)
 from app.schemas.case import CaseResponse, UploadResponse
 from app.models.case import Case, CaseStatus, Priority
+from app.models.case_version import CaseVersionStatus
+from app.repositories.case_version_repository import (
+    case_version_repository,
+    case_version_file_repository,
+)
 from app.models.case_file import CaseFile
 from app.services.storage_service import storage_service
 from app.services.case_processor import case_processor
+from app.services.case_version_service import create_version_for_new_case
 from app.services.pdf_service import pdf_service
 from app.services.pdf_generator_service import pdf_generator_service
 # Use fpdf2 for PDF generation when available; resolve lazily so tests can load app without fpdf2 installed
@@ -47,6 +53,31 @@ from app.core.config import settings
 
 # Disable trailing slash redirect
 router = APIRouter(redirect_slashes=False)
+
+
+def _resolve_export_version(
+    db: Session,
+    case_repository: CaseRepository,
+    case_id: str,
+    user_id: str,
+    case_version_id: Optional[str],
+) -> tuple[Case, str]:
+    """Pick a READY case version for PDF/JSON export (explicit or live)."""
+    case = case_repository.get_by_id(db, case_id, user_id=user_id)
+    if not case:
+        raise HTTPException(status_code=404, detail="Case not found")
+    vid = case_version_id or case.live_version_id
+    if not vid:
+        raise HTTPException(status_code=400, detail="Case has no version to export")
+    v = case_version_repository.get_by_id_for_user(db, vid, user_id)
+    if not v or v.case_id != case_id:
+        raise HTTPException(status_code=404, detail="Version not found")
+    if v.status != CaseVersionStatus.READY:
+        raise HTTPException(
+            status_code=400,
+            detail="Selected version is not ready for export",
+        )
+    return case, vid
 
 
 async def _get_cases_impl(
@@ -97,6 +128,9 @@ async def _get_cases_impl(
             "assigned_to": None,
             "record_count": case.record_count,
             "page_count": case.page_count,
+            "live_version_id": case.live_version_id,
+            "latest_version_number": case.latest_version_number or 1,
+            "processing_version_id": case.processing_version_id,
             "review_status": ReviewStatus.NOT_REVIEWED,
             "reviewed_by": case.reviewed_by,
             "reviewed_at": case.reviewed_at,
@@ -173,6 +207,9 @@ async def get_case(
         "assigned_to": None,
         "record_count": case.record_count,
         "page_count": case.page_count,
+        "live_version_id": case.live_version_id,
+        "latest_version_number": case.latest_version_number or 1,
+        "processing_version_id": case.processing_version_id,
         "review_status": ReviewStatus.NOT_REVIEWED,
         "reviewed_by": case.reviewed_by,
         "reviewed_at": case.reviewed_at,
@@ -300,6 +337,7 @@ async def upload_case(
         
         # Create CaseFile records for each uploaded file
         total_pages = 0
+        created_file_ids: List[str] = []
         for idx, (file_path, file_size, original_filename) in enumerate(file_results):
             # Get page count from PDF
             page_count = pdf_service.count_pages(file_path)
@@ -321,13 +359,17 @@ async def upload_case(
                 uploaded_at=datetime.utcnow()
             )
             case_file_repository.create(db, case_file)
-        
+            created_file_ids.append(case_file.id)
+
         # Update case page count
         new_case.page_count = total_pages
         case_repository.update(db, new_case)
 
+        # Immutable v1 snapshot + pipeline
+        cv = create_version_for_new_case(db, new_case, created_file_ids)
+
         # Enqueue case processing on UM-Jobs (non-blocking)
-        job_id = await enqueue_case_processing(case_id, str(current_user.id))
+        job_id = await enqueue_case_processing(case_id, str(current_user.id), cv.id)
         if job_id is None:
             # Fallback if Redis/ARQ unavailable
             async def process_case_async():
@@ -363,7 +405,11 @@ async def generate_summary(
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
 
-    job_id = await enqueue_case_processing(case_id, str(current_user.id))
+    vid = case.processing_version_id or case.live_version_id
+    if not vid:
+        raise HTTPException(status_code=400, detail="Case has no version to process")
+
+    job_id = await enqueue_case_processing(case_id, str(current_user.id), vid)
     if job_id is None:
         async def process_case_async():
             await case_processor.process_case(case_id)
@@ -373,6 +419,7 @@ async def generate_summary(
     return {
         "message": "Summary regeneration started",
         "case_id": case_id,
+        "case_version_id": vid,
     }
 
 
@@ -394,15 +441,21 @@ async def retry_processing(
     case.processed_at = None
     case_repository.update(db, case)
 
-    # Clear UM-Jobs checkpoint state so pipeline restarts from J1
+    vid = case.processing_version_id or case.live_version_id
+    if not vid:
+        raise HTTPException(status_code=400, detail="Case has no version to retry")
+
     try:
-        db.execute(text("DELETE FROM case_jobs WHERE case_id = :cid"), {"cid": case_id})
+        db.execute(
+            text("DELETE FROM case_jobs WHERE case_version_id = :vid"),
+            {"vid": vid},
+        )
         db.commit()
     except Exception as e:
         logger.warning("Clear case_jobs failed (table may not exist): %s", e)
         db.rollback()
 
-    job_id = await enqueue_case_processing(case_id, str(current_user.id))
+    job_id = await enqueue_case_processing(case_id, str(current_user.id), vid)
     if job_id is None:
         async def process_case_async():
             await case_processor.process_case(case_id)
@@ -593,9 +646,12 @@ async def delete_case(
 @router.get("/{case_id}/pdf")
 async def generate_case_pdf(
     case_id: str,
+    case_version_id: Optional[str] = Query(
+        None, description="Clinical version to export; defaults to live"
+    ),
     db: Session = Depends(get_db),
     case_repository: CaseRepository = Depends(get_case_repository),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
     """
     Generate PDF summary for a UM case
@@ -609,31 +665,30 @@ async def generate_case_pdf(
     - Source Index
     """
     try:
-        # Get case and verify access
-        case = case_repository.get_by_id(db, case_id)
-        if not case:
-            raise HTTPException(status_code=404, detail="Case not found")
-        
-        if case.user_id != current_user.id:
-            raise HTTPException(status_code=403, detail="Access denied")
-        
-        # Check case is ready
-        if case.status != CaseStatus.READY:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Case is not ready for PDF generation. Current status: {case.status.value}"
-            )
-        
-        # Get extraction
-        extraction = extraction_repository.get_by_case_id(db, case_id)
+        case, vid = _resolve_export_version(
+            db, case_repository, case_id, current_user.id, case_version_id
+        )
+
+        extraction = extraction_repository.get_by_case_id_and_version(
+            db, case_id, vid, user_id=current_user.id
+        )
         if not extraction:
-            raise HTTPException(status_code=404, detail="Case extraction not found. Case may not be fully processed.")
-        
-        # Get case files
-        case_files = db.query(CaseFile).filter(
-            CaseFile.case_id == case_id,
-            CaseFile.user_id == current_user.id
-        ).order_by(CaseFile.file_order).all()
+            raise HTTPException(
+                status_code=404,
+                detail="Clinical extraction not found for this version.",
+            )
+
+        file_ids = case_version_file_repository.file_ids_for_version(db, vid)
+        case_files = (
+            db.query(CaseFile)
+            .filter(
+                CaseFile.id.in_(file_ids),
+                CaseFile.case_id == case_id,
+                CaseFile.user_id == current_user.id,
+            )
+            .order_by(CaseFile.file_order)
+            .all()
+        )
         
         if not case_files:
             raise HTTPException(status_code=404, detail="No files found for this case")
@@ -683,10 +738,13 @@ async def generate_case_pdf(
 @router.get("/{case_id}/json")
 async def export_case_json(
     case_id: str,
+    case_version_id: Optional[str] = Query(
+        None, description="Clinical version to export; defaults to live"
+    ),
     db: Session = Depends(get_db),
     case_repository: CaseRepository = Depends(get_case_repository),
     case_file_repository: CaseFileRepository = Depends(get_case_file_repository),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
     """
     Export case data as structured JSON
@@ -703,16 +761,20 @@ async def export_case_json(
     import json as json_lib
     
     try:
-        # Get case and verify access
-        case = case_repository.get_by_id(db, case_id, user_id=current_user.id)
-        if not case:
-            raise HTTPException(status_code=404, detail="Case not found")
-        
-        # Get extraction
-        extraction = extraction_repository.get_by_case_id(db, case_id, user_id=current_user.id)
-        
-        # Get case files
-        case_files = case_file_repository.get_by_case_id(db, case_id)
+        case, vid = _resolve_export_version(
+            db, case_repository, case_id, current_user.id, case_version_id
+        )
+
+        extraction = extraction_repository.get_by_case_id_and_version(
+            db, case_id, vid, user_id=current_user.id
+        )
+
+        file_ids = set(case_version_file_repository.file_ids_for_version(db, vid))
+        all_files = case_file_repository.get_by_case_id(db, case_id)
+        case_files = [f for f in all_files if f.id in file_ids]
+        case_files.sort(key=lambda f: f.file_order)
+
+        ver_row = case_version_repository.get_by_id_for_user(db, vid, current_user.id)
         
         # Get decision if exists
         from app.repositories.decision_repository import DecisionRepository
@@ -725,7 +787,10 @@ async def export_case_json(
                 "exported_at": datetime.utcnow().isoformat(),
                 "exported_by": current_user.email,
                 "case_id": case_id,
-                "format_version": "1.0"
+                "case_version_id": vid,
+                "version_number": ver_row.version_number if ver_row else None,
+                "is_live_version": bool(ver_row and ver_row.is_live),
+                "format_version": "1.1",
             },
             "case": {
                 "id": case.id,

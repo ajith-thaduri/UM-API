@@ -4,6 +4,7 @@ from fastapi import APIRouter
 from app.api.endpoints import (
     auth,
     cases,
+    case_versions,
     extractions,
     users,
     decisions,
@@ -28,6 +29,7 @@ api_router.include_router(auth.router, prefix="", tags=["auth"])
 api_router.include_router(oauth.router, prefix="", tags=["oauth"])
 api_router.include_router(sources.router, prefix="", tags=["sources"])
 api_router.include_router(cases.router, prefix="/cases", tags=["cases"])
+api_router.include_router(case_versions.router, prefix="/cases", tags=["case-versions"])
 api_router.include_router(extractions.router, prefix="/extractions", tags=["extractions"])
 api_router.include_router(users.router, prefix="/users", tags=["users"])
 api_router.include_router(decisions.router, prefix="/cases", tags=["decisions"])

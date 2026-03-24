@@ -2,7 +2,7 @@
 
 import logging
 import re
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 from sqlalchemy.orm import Session
 import threading
 
@@ -44,17 +44,31 @@ class PromptService:
         except Exception as e:
             logger.error(f"Error refreshing prompt cache: {e}")
 
+    def _merge_into_cache(self, prompt_id: str, row) -> Dict[str, Any]:
+        """Store a row from DB into the in-memory cache (e.g. prompt added after process start)."""
+        data = {
+            "template": row.template,
+            "system_message": row.system_message,
+            "variables": row.variables,
+            "name": row.name,
+            "category": row.category,
+        }
+        with self._lock:
+            self._cache[prompt_id] = data
+        return data
+
     def get_prompt_template(self, prompt_id: str) -> Optional[str]:
         """Get the raw template for a prompt"""
         with self._get_db() as db:
             self._ensure_cache(db)
             prompt_data = self._cache.get(prompt_id)
             if not prompt_data:
-                # Try fetching directly if not in cache
                 p = prompt_repository.get_by_id(db, prompt_id)
                 if p:
-                    return p.template
-            return prompt_data["template"] if prompt_data else None
+                    prompt_data = self._merge_into_cache(prompt_id, p)
+                else:
+                    return None
+            return prompt_data["template"]
 
     def get_system_message(self, prompt_id: str) -> Optional[str]:
         """Get the system message for a prompt"""
@@ -62,26 +76,23 @@ class PromptService:
             self._ensure_cache(db)
             prompt_data = self._cache.get(prompt_id)
             if not prompt_data:
-                # Try fetching directly if not in cache
                 p = prompt_repository.get_by_id(db, prompt_id)
                 if p:
-                    return p.system_message
-            return prompt_data["system_message"] if prompt_data else None
+                    prompt_data = self._merge_into_cache(prompt_id, p)
+                else:
+                    return None
+            return prompt_data["system_message"]
 
     def render_prompt(self, prompt_id: str, variables: Dict[str, Any]) -> str:
         """Render a prompt by replacing variables in the template"""
         with self._get_db() as db:
             self._ensure_cache(db)
             prompt_data = self._cache.get(prompt_id)
-            
+
             if not prompt_data:
-                # Try fetching directly if not in cache
                 p = prompt_repository.get_by_id(db, prompt_id)
                 if p:
-                    prompt_data = {
-                        "template": p.template,
-                        "system_message": p.system_message
-                    }
+                    prompt_data = self._merge_into_cache(prompt_id, p)
                 else:
                     logger.error(f"Prompt {prompt_id} not found in database or cache")
                     raise ValueError(f"Prompt {prompt_id} not found")

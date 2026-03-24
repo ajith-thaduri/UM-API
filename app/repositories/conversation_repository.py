@@ -2,44 +2,41 @@
 
 from typing import List, Optional
 from sqlalchemy.orm import Session
-from sqlalchemy import desc
-
 from app.models.conversation import ConversationMessage
+from app.models.case import Case
+
+
+def _resolve_case_version_id(db: Session, case_id: str, case_version_id: Optional[str]) -> Optional[str]:
+    if case_version_id:
+        return case_version_id
+    case = db.query(Case).filter(Case.id == case_id).first()
+    return case.live_version_id if case else None
 
 
 class ConversationRepository:
     """Repository for managing conversation messages"""
-    
+
     def get_conversation_history(
         self,
         db: Session,
         case_id: str,
         user_id: str,
-        limit: int = 10
+        limit: int = 10,
+        case_version_id: Optional[str] = None,
     ) -> List[ConversationMessage]:
-        """
-        Get conversation history for a case, ordered by creation date
-        
-        Args:
-            db: Database session
-            case_id: Case ID
-            user_id: User ID
-            limit: Maximum number of messages to return (default: 10)
-            
-        Returns:
-            List of ConversationMessage objects, ordered by created_at (oldest first)
-        """
-        return (
-            db.query(ConversationMessage)
-            .filter(
-                ConversationMessage.case_id == case_id,
-                ConversationMessage.user_id == user_id
-            )
-            .order_by(ConversationMessage.created_at.asc())
-            .limit(limit)
-            .all()
+        vid = _resolve_case_version_id(db, case_id, case_version_id)
+        q = db.query(ConversationMessage).filter(
+            ConversationMessage.case_id == case_id,
+            ConversationMessage.user_id == user_id,
         )
-    
+        if vid:
+            q = q.filter(ConversationMessage.case_version_id == vid)
+        else:
+            q = q.filter(ConversationMessage.case_version_id.is_(None))
+        return (
+            q.order_by(ConversationMessage.created_at.asc()).limit(limit).all()
+        )
+
     def add_message(
         self,
         db: Session,
@@ -47,64 +44,45 @@ class ConversationRepository:
         user_id: str,
         role: str,
         content: str,
-        sources: Optional[List[dict]] = None
+        sources: Optional[List[dict]] = None,
+        case_version_id: Optional[str] = None,
+        agent_metadata: Optional[dict] = None,
     ) -> ConversationMessage:
-        """
-        Add a message to the conversation
-        
-        Args:
-            db: Database session
-            case_id: Case ID
-            user_id: User ID
-            role: Message role ("user" or "assistant")
-            content: Message content
-            sources: Optional list of source references
-            
-        Returns:
-            Created ConversationMessage
-        """
+        vid = _resolve_case_version_id(db, case_id, case_version_id)
         message = ConversationMessage(
             case_id=case_id,
             user_id=user_id,
             role=role,
             content=content,
-            sources=sources or []
+            sources=sources or [],
+            case_version_id=vid,
+            agent_metadata=agent_metadata,
         )
         db.add(message)
         db.commit()
         db.refresh(message)
         return message
-    
+
     def clear_conversation(
         self,
         db: Session,
         case_id: str,
-        user_id: str
+        user_id: str,
+        case_version_id: Optional[str] = None,
     ) -> int:
-        """
-        Clear all messages for a conversation
-        
-        Args:
-            db: Database session
-            case_id: Case ID
-            user_id: User ID
-            
-        Returns:
-            Number of messages deleted
-        """
-        count = (
-            db.query(ConversationMessage)
-            .filter(
-                ConversationMessage.case_id == case_id,
-                ConversationMessage.user_id == user_id
-            )
-            .delete()
+        vid = _resolve_case_version_id(db, case_id, case_version_id)
+        q = db.query(ConversationMessage).filter(
+            ConversationMessage.case_id == case_id,
+            ConversationMessage.user_id == user_id,
         )
+        if vid:
+            q = q.filter(ConversationMessage.case_version_id == vid)
+        else:
+            q = q.filter(ConversationMessage.case_version_id.is_(None))
+        count = q.delete()
         db.commit()
         return count
 
 
 # Singleton instance
 conversation_repository = ConversationRepository()
-
-

@@ -382,6 +382,7 @@ async def confirm_upload(
                 if file_info.get("name") and file_info.get("type"):
                     file_types_map[file_info["name"]] = file_info["type"]
         
+        created_file_ids = []
         for idx, (file_path, file_size, original_filename) in enumerate(new_file_results):
             logger.info(f"Creating CaseFile record {idx+1}/{len(new_file_results)}: {original_filename}")
             page_count = pdf_service.count_pages(file_path)
@@ -403,10 +404,14 @@ async def confirm_upload(
                 uploaded_at=datetime.utcnow()
             )
             case_file_repository.create(db, case_file)
+            created_file_ids.append(case_file.id)
         
         # Update case page count
         new_case.page_count = total_pages
         case_repository.update(db, new_case)
+
+        from app.services.case_version_service import create_version_for_new_case
+        create_version_for_new_case(db, new_case, created_file_ids)
         
         # Update session with case ID
         session.case_id = case_id
@@ -466,7 +471,14 @@ async def _process_with_status_updates(case_id: str, session_id: str):
         user_id = session.user_id if session else None
 
         # Try to enqueue to UM-Jobs first (non-blocking)
-        job_id = await enqueue_case_processing(case_id, user_id or "")
+        case_repository = CaseRepository()
+        case_row = case_repository.get_by_id(db, case_id)
+        cv_id = case_row.live_version_id if case_row else None
+        if not cv_id:
+            logger.error("Case %s has no live_version_id — cannot enqueue", case_id)
+            return
+
+        job_id = await enqueue_case_processing(case_id, user_id or "", cv_id)
 
         if job_id:
             # Enqueued successfully — UM-Jobs will update Case.status when done
@@ -501,11 +513,9 @@ async def _process_with_status_updates(case_id: str, session_id: str):
             # Automatically trigger dashboard build after processing completes
             try:
                 from app.services.orchestrator_service import build_orchestrator_service
-                from app.repositories.case_repository import CaseRepository
-                
-                # Get case to retrieve user_id
-                case_repo = CaseRepository()
-                case = case_repo.get_by_id(db, case_id)
+
+                # Reuse repository from above (inner import would shadow CaseRepository and break line 474)
+                case = case_repository.get_by_id(db, case_id)
                 if case and case.user_id:
                     orchestrator = build_orchestrator_service()
                     logger.info(f"Auto-building dashboard for case {case_id}")
@@ -518,8 +528,6 @@ async def _process_with_status_updates(case_id: str, session_id: str):
                 db.rollback()  # Rollback on error
                 logger.warning(f"Failed to auto-build dashboard for case {case_id}: {build_error}", exc_info=True)
                 # Don't fail the whole process if dashboard build fails
-            except Exception as e:
-                logger.warning(f"Error triggering dashboard build: {e}", exc_info=True)
         else:
             error_msg = result.get("error", "Unknown error") if result else "Processing returned no result"
             logger.error(f"Case processing failed for {case_id}: {error_msg}")

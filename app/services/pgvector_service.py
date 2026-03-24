@@ -50,7 +50,8 @@ class PGVectorService:
         user_id: Optional[str] = None,
         top_k: int = 10,
         filter_dict: Optional[Dict[str, Any]] = None,
-        include_metadata: bool = True
+        include_metadata: bool = True,
+        case_version_id: Optional[str] = None,
     ) -> List[VectorMatch]:
         """
         Query database for similar vectors
@@ -61,9 +62,10 @@ class PGVectorService:
         db = SessionLocal()
         try:
             # Prepare filters
-            final_filter = {"case_id": case_id, "user_id": user_id}
+            final_filter: Dict[str, Any] = {"case_id": case_id, "user_id": user_id}
+            if case_version_id:
+                final_filter["case_version_id"] = case_version_id
             if filter_dict:
-                # Merge user filters
                 final_filter.update(filter_dict)
             
             # Search
@@ -109,14 +111,16 @@ class PGVectorService:
         query_vector: List[float],
         case_id: str,
         user_id: Optional[str] = None,
-        top_k: int = 20
+        top_k: int = 20,
+        case_version_id: Optional[str] = None,
     ) -> List[VectorMatch]:
-        """Query for chunks within a specific case"""
+        """Query for chunks within a specific case (optionally scoped to a processing version)."""
         return self.query(
             case_id=case_id,
             query_vector=query_vector,
             user_id=user_id,
-            top_k=top_k
+            top_k=top_k,
+            case_version_id=case_version_id,
         )
 
     def delete_case_chunks(self, case_id: str, user_id: Optional[str] = None) -> int:

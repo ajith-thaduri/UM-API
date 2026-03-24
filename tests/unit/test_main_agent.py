@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch, AsyncMock
 from sqlalchemy.orm import Session
 from app.services.main_agent import MainAgent, FollowUpResponse, ConversationMessage
 from app.services.rag_retriever import RAGContext, RetrievedChunk
+from app.services.case_agent_service import CaseAgentRunResult
 from app.models.document_chunk import SectionType
 from datetime import datetime
 
@@ -45,24 +46,45 @@ def mock_rag_context():
 
 @pytest.mark.asyncio
 async def test_answer_follow_up_question(main_agent, mock_db, mock_rag_context):
+    run_result = CaseAgentRunResult(
+        answer="The patient has hypertension.",
+        sources=[
+            {
+                "chunk_id": "chunk-1",
+                "vector_id": "vec-1",
+                "file_id": "file-1",
+                "page_number": 1,
+                "section_type": "clinical",
+                "score": 0.9,
+                "text_preview": "Patient has hypertension.",
+            }
+        ],
+        chunks_used=["chunk-1"],
+        confidence=0.9,
+        suggested_actions=["View source document"],
+        trace_steps=[{"id": "compose", "label": "Composing grounded answer", "status": "done"}],
+        context_summary="Intent=general_case_qa",
+        active_version_summary={"version_count": 1},
+        used_artifacts=["retrieved_evidence"],
+        resolved_intent="general_case_qa",
+    )
     with patch.object(main_agent, "_get_conversation_history", return_value=[]), \
-         patch.object(main_agent, "_get_dashboard_context", return_value="Dashboard context"), \
-         patch.object(main_agent, "_retrieve_relevant_context", return_value=mock_rag_context), \
-         patch("app.services.main_agent.prompt_service.render_prompt", return_value="Mock prompt"), \
-         patch.object(main_agent, "_get_llm_response", new_callable=AsyncMock) as mock_llm, \
+         patch("app.services.case_agent_service.run_case_agent_turn", new_callable=AsyncMock) as mock_run, \
          patch.object(main_agent, "_add_to_history") as mock_add_history:
-        
-        mock_llm.return_value = ("The patient has hypertension.", 0.9)
-        
+
+        mock_run.return_value = run_result
+
         response = await main_agent.answer_follow_up_question(
             mock_db, "case-1", "Does the patient have hypertension?", "user-1"
         )
-        
+
         assert isinstance(response, FollowUpResponse)
         assert response.answer == "The patient has hypertension."
         assert len(response.sources) == 1
         assert response.confidence == 0.9
-        assert mock_add_history.call_count == 2 # Once for user, once for assistant
+        assert response.trace_steps
+        assert mock_add_history.call_count == 2  # user + assistant
+        mock_run.assert_awaited_once()
 
 def test_estimate_confidence(main_agent):
     assert main_agent._estimate_confidence("The patient has hypertension.") == 0.8
@@ -77,4 +99,6 @@ def test_extract_suggested_actions(main_agent):
 def test_clear_conversation_history(main_agent, mock_db):
     with patch("app.repositories.conversation_repository.conversation_repository.clear_conversation") as mock_clear:
         main_agent.clear_conversation_history(mock_db, "case-1", "user-1")
-        mock_clear.assert_called_once_with(mock_db, "case-1", "user-1")
+        mock_clear.assert_called_once_with(
+            mock_db, "case-1", "user-1", case_version_id=None
+        )
