@@ -2,16 +2,24 @@
 
 import uuid
 import logging
+from pathlib import Path
 from typing import List
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks, Form, Body
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
+
+from app.core.config import settings
 
 from app.db.session import get_db
 from app.db.dependencies import get_case_repository, get_case_file_repository
 from app.repositories.case_repository import CaseRepository
 from app.repositories.case_file_repository import CaseFileRepository
 from app.services.upload_agent_service import upload_agent_service, ConversationState
+from app.services.upload_session_storage_cleanup import (
+    delete_temp_upload_storage,
+    is_resumable_upload_state,
+)
 from app.services.pdf_analyzer_service import pdf_analyzer_service
 from app.services.storage_service import storage_service
 from app.services.case_processor import case_processor
@@ -33,11 +41,51 @@ from app.schemas.upload_agent import (
     FileInfoResponse,
     PatientInfoResponse,
     ConversationStateEnum,
+    UploadDraftSummaryResponse,
+    ResumeUploadSessionResponse,
 )
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/upload/agent", tags=["upload-agent"])
+
+
+def _public_session_file_entries(session_files: list | None) -> List[FileInfoResponse]:
+    """Expose vault metadata only (no temp_path / path)."""
+    out: List[FileInfoResponse] = []
+    for f in session_files or []:
+        if not isinstance(f, dict):
+            continue
+        out.append(
+            FileInfoResponse(
+                name=f.get("name") or "document.pdf",
+                pages=int(f.get("pages") or 0),
+                type=str(f.get("type") or "unknown"),
+                size=f.get("size"),
+            )
+        )
+    return out
+
+
+def _read_upload_session_pdf_bytes(file_info: dict) -> bytes:
+    """Load PDF bytes for a row in session.files (S3 key, storage-relative key, or local path)."""
+    raw = file_info.get("temp_path") or file_info.get("path")
+    if not raw:
+        raise HTTPException(status_code=404, detail="File not available for this session")
+    key = str(raw).strip()
+
+    try:
+        if key.startswith("users/") or key.startswith("cases/"):
+            return storage_service.get_file_content(key)
+        p = Path(key)
+        if p.is_file():
+            return p.read_bytes()
+        return storage_service.get_file_content(key)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="File not found")
+    except Exception as e:
+        logger.warning("Failed to read upload session file (%s): %s", key, e)
+        raise HTTPException(status_code=404, detail="File not found")
 
 
 @router.post("/start", response_model=StartSessionResponse)
@@ -163,7 +211,9 @@ async def send_message(
     if hasattr(session, 'user_id') and session.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Session does not belong to current user")
     
-    agent_message = await upload_agent_service.process_message(db, request.session_id, request.message)
+    agent_message = await upload_agent_service.process_message(
+        db, request.session_id, request.message
+    )
     
     # Get updated session state
     session = upload_agent_service.get_session(db, request.session_id)
@@ -576,11 +626,17 @@ async def _process_with_status_updates(case_id: str, session_id: str):
 
 
 @router.get("/status/{session_id}", response_model=SessionStatusResponse)
-async def get_session_status(session_id: str, db: Session = Depends(get_db)):
+async def get_session_status(
+    session_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """Get current session status. When case is processed by UM-Jobs, derive complete from Case.status."""
     session = upload_agent_service.get_session(db, session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+    if hasattr(session, "user_id") and session.user_id and session.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Session does not belong to current user")
 
     processing_status = session.processing_status
     processing_progress = session.processing_progress
@@ -606,13 +662,119 @@ async def get_session_status(session_id: str, db: Session = Depends(get_db)):
     )
 
 
+@router.get("/sessions", response_model=List[UploadDraftSummaryResponse])
+async def list_upload_agent_sessions(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """List draft upload sessions the current user can resume (no case yet, conversational states)."""
+    drafts = upload_agent_service.list_resumable_drafts(db, current_user.id)
+    drafts.sort(key=lambda s: s.updated_at or s.created_at, reverse=True)
+    result: List[UploadDraftSummaryResponse] = []
+    for s in drafts:
+        pi = s.patient_info or {}
+        if not isinstance(pi, dict):
+            pi = pi.to_dict() if hasattr(pi, "to_dict") else {}
+        name = pi.get("name")
+        if name and len(str(name)) > 80:
+            name = str(name)[:77] + "..."
+        result.append(
+            UploadDraftSummaryResponse(
+                session_id=s.id,
+                updated_at=s.updated_at,
+                state=ConversationStateEnum(s.state),
+                file_count=len(s.files or []),
+                patient_name_snippet=name,
+            )
+        )
+    return result
+
+
+@router.post("/resume/{session_id}", response_model=ResumeUploadSessionResponse)
+async def resume_upload_session(
+    session_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return session bootstrap for the upload UI (messages + state); does not create a new session."""
+    session = upload_agent_service.get_session(db, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if hasattr(session, "user_id") and session.user_id and session.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Session does not belong to current user")
+    if session.case_id is not None:
+        raise HTTPException(status_code=400, detail="Session already linked to a case")
+    if not is_resumable_upload_state(session.state):
+        raise HTTPException(status_code=400, detail="Session is not in a resumable state")
+
+    pi = session.patient_info or {}
+    if not isinstance(pi, dict):
+        pi = pi.to_dict() if hasattr(pi, "to_dict") else {}
+    return ResumeUploadSessionResponse(
+        session_id=session.id,
+        state=ConversationStateEnum(session.state),
+        patient_info=PatientInfoResponse(**pi),
+        messages=list(session.messages or []),
+        file_count=len(session.files or []),
+        files=_public_session_file_entries(session.files),
+    )
+
+
+@router.get("/session/{session_id}/file/{file_index}")
+async def get_upload_session_file(
+    session_id: str,
+    file_index: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Return the PDF bytes for an uploaded file in this session (auth + ownership).
+    Used by the upload UI document vault (open in new tab via blob URL).
+    """
+    if file_index < 0:
+        raise HTTPException(status_code=400, detail="Invalid file index")
+
+    session = upload_agent_service.get_session(db, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if hasattr(session, "user_id") and session.user_id and session.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Session does not belong to current user")
+
+    files = session.files or []
+    if file_index >= len(files):
+        raise HTTPException(status_code=404, detail="File not found")
+
+    entry = files[file_index]
+    if not isinstance(entry, dict):
+        raise HTTPException(status_code=404, detail="File not found")
+
+    content = _read_upload_session_pdf_bytes(entry)
+    filename = entry.get("name") or "document.pdf"
+    safe_name = "".join(c for c in str(filename) if c.isalnum() or c in "._- ")[:180] or "document.pdf"
+
+    return Response(
+        content=content,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'inline; filename="{safe_name}"',
+            "Cache-Control": "private, max-age=3600",
+        },
+    )
+
+
 @router.get("/messages/{session_id}")
-async def get_session_messages(session_id: str, db: Session = Depends(get_db)):
+async def get_session_messages(
+    session_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """Get all messages in a session"""
     session = upload_agent_service.get_session(db, session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    
+    if hasattr(session, "user_id") and session.user_id and session.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Session does not belong to current user")
+
     return {
         "session_id": session_id,
         "messages": session.messages
@@ -620,21 +782,30 @@ async def get_session_messages(session_id: str, db: Session = Depends(get_db)):
 
 
 @router.delete("/session/{session_id}")
-async def delete_session(session_id: str, db: Session = Depends(get_db)):
-    """Delete a session"""
-    success = upload_agent_service.delete_session(db, session_id)
-    
-    # Also clean up temp files
-    try:
-        import shutil
-        temp_dir = storage_service.get_case_directory(f"temp_{session_id}")
-        if temp_dir.exists():
-            shutil.rmtree(temp_dir)
-    except Exception as e:
-        logger.warning(f"Failed to clean temp directory: {e}")
-    
-    if success:
-        return {"message": "Session deleted successfully"}
-    else:
+async def delete_session(
+    session_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Delete a session and best-effort remove temp_* storage (S3 and local)."""
+    session = upload_agent_service.get_session(db, session_id)
+    if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+    if hasattr(session, "user_id") and session.user_id and session.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Session does not belong to current user")
+
+    # Storage cleanup must not block DB delete: user can always drop the row; log and continue.
+    try:
+        owner_id = getattr(session, "user_id", None) or current_user.id
+        delete_temp_upload_storage(user_id=owner_id, session_id=session_id)
+    except Exception as e:
+        logger.warning(
+            "Failed to delete temp upload storage for session %s: %s",
+            session_id,
+            e,
+            exc_info=True,
+        )
+
+    upload_agent_service.delete_session(db, session_id)
+    return {"message": "Session deleted successfully"}
 

@@ -3,6 +3,7 @@
 import json
 import re
 import logging
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -11,7 +12,7 @@ logger = logging.getLogger(__name__)
 EXTRACTION_RULES = """
 
 EXTRACTION RULES:
-1. Return ONLY valid JSON. Do not include markdown code fences.
+1. Return ONLY one JSON object with named keys (e.g. {"medications": []}). Do not return a JSON array at the root. No markdown code fences.
 2. GROUNDING: Extract ONLY information explicitly stated in the provided context.
 3. Extract each unique clinical entity ONCE per date.
 4. If the same item appears multiple times, keep the entry with the most complete information (include source_page).
@@ -22,7 +23,7 @@ EXTRACTION RULES:
 9. When values are given as ranges (e.g., "glucose 180-280"), report the range - do not invent specific values."""
 
 
-def extract_json_from_response(response: str) -> dict:
+def extract_json_from_response(response: str) -> Any:
     """
     Extract JSON from LLM response, handling markdown code blocks and extra text.
     
@@ -35,7 +36,7 @@ def extract_json_from_response(response: str) -> dict:
         response: Raw response string from LLM
         
     Returns:
-        Parsed JSON dictionary
+        Parsed JSON value (usually dict; may be list if the model returned an array)
         
     Raises:
         ValueError: If no valid JSON can be extracted

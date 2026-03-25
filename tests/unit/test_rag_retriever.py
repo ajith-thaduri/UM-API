@@ -1,3 +1,5 @@
+from typing import List
+
 import pytest
 from unittest.mock import MagicMock, patch
 from sqlalchemy.orm import Session
@@ -72,11 +74,139 @@ def test_retrieve_for_query(rag_retriever, mock_db):
          patch("app.services.rag_retriever.pgvector_service.query_case_chunks", return_value=mock_matches), \
          patch("app.services.rag_retriever.chunk_repository.get_by_vector_ids", return_value=[mock_chunk]):
         
-        results = rag_retriever.retrieve_for_query(mock_db, "query", "case1", "user1")
+        results = rag_retriever.retrieve_for_query(
+            mock_db, "query", "case1", "user1", top_k=10, use_adaptive=False
+        )
         
         assert len(results) == 1
         assert results[0].chunk_id == "c1"
         assert results[0].score == 0.9
+
+
+def test_clinical_lexical_terms_ecg():
+    terms = RAGRetriever.clinical_lexical_terms_from_query("Which document has ECG data?")
+    assert "ECG" in terms
+    assert "electrocardiogram" in terms
+
+
+def test_retrieve_for_query_merges_lexical_hits(rag_retriever, mock_db):
+    mock_matches = [MagicMock(vector_id="v1", score=0.9)]
+    mock_chunk = MagicMock(spec=DocumentChunk)
+    mock_chunk.id = "c1"
+    mock_chunk.vector_id = "v1"
+    mock_chunk.case_id = "case1"
+    mock_chunk.file_id = "f1"
+    mock_chunk.page_number = 1
+    mock_chunk.section_type = SectionType.CLINICAL
+    mock_chunk.chunk_text = "Vector hit"
+    mock_chunk.char_start = 0
+    mock_chunk.char_end = 6
+    mock_chunk.token_count = 2
+    mock_chunk.bbox = None
+    mock_chunk.word_segments = None
+
+    mock_lex = MagicMock(spec=DocumentChunk)
+    mock_lex.id = "cLex"
+    mock_lex.vector_id = "vLex"
+    mock_lex.case_id = "case1"
+    mock_lex.file_id = "f2"
+    mock_lex.page_number = 3
+    mock_lex.section_type = SectionType.CLINICAL
+    mock_lex.chunk_text = "Electrocardiogram normal sinus rhythm"
+    mock_lex.char_start = 0
+    mock_lex.char_end = 10
+    mock_lex.token_count = 5
+    mock_lex.bbox = None
+    mock_lex.word_segments = None
+
+    with patch(
+        "app.services.rag_retriever.embedding_service.generate_query_embedding", return_value=[0.1] * 1536
+    ), patch(
+        "app.services.rag_retriever.pgvector_service.query_case_chunks", return_value=mock_matches
+    ), patch(
+        "app.services.rag_retriever.chunk_repository.get_by_vector_ids", return_value=[mock_chunk]
+    ), patch(
+        "app.services.rag_retriever.chunk_repository.search_chunks_text_ilike", return_value=[mock_lex]
+    ):
+        results = rag_retriever.retrieve_for_query(
+            mock_db,
+            "ECG on file?",
+            "case1",
+            "user1",
+            top_k=10,
+            use_adaptive=False,
+            case_version_id="vid1",
+            merge_lexical_matches=True,
+        )
+
+    ids = [r.chunk_id for r in results]
+    assert "cLex" in ids
+    assert "c1" in ids
+
+
+def test_retrieve_for_evidence_search_merges_extra_lexical(rag_retriever, mock_db):
+    mock_matches = [MagicMock(vector_id="v1", score=0.9)]
+    mock_chunk = MagicMock(spec=DocumentChunk)
+    mock_chunk.id = "c1"
+    mock_chunk.vector_id = "v1"
+    mock_chunk.case_id = "case1"
+    mock_chunk.file_id = "f1"
+    mock_chunk.page_number = 1
+    mock_chunk.section_type = SectionType.CLINICAL
+    mock_chunk.chunk_text = "Vector hit"
+    mock_chunk.char_start = 0
+    mock_chunk.char_end = 6
+    mock_chunk.token_count = 2
+    mock_chunk.bbox = None
+    mock_chunk.word_segments = None
+
+    mock_lex = MagicMock(spec=DocumentChunk)
+    mock_lex.id = "cExtra"
+    mock_lex.vector_id = "vExtra"
+    mock_lex.case_id = "case1"
+    mock_lex.file_id = "f9"
+    mock_lex.page_number = 2
+    mock_lex.section_type = SectionType.CLINICAL
+    mock_lex.chunk_text = "Temperature was 101 in the chart"
+    mock_lex.char_start = 0
+    mock_lex.char_end = 10
+    mock_lex.token_count = 5
+    mock_lex.bbox = None
+    mock_lex.word_segments = None
+
+    embed_calls: List[str] = []
+
+    def capture_embed(text: str):
+        embed_calls.append(text)
+        return [0.1] * 1536
+
+    with patch(
+        "app.services.rag_retriever.embedding_service.generate_query_embedding", side_effect=capture_embed
+    ), patch(
+        "app.services.rag_retriever.pgvector_service.query_case_chunks", return_value=mock_matches
+    ), patch(
+        "app.services.rag_retriever.chunk_repository.get_by_vector_ids", return_value=[mock_chunk]
+    ), patch(
+        "app.services.rag_retriever.chunk_repository.search_chunks_text_ilike", return_value=[mock_lex]
+    ):
+        results = rag_retriever.retrieve_for_evidence_search(
+            mock_db,
+            primary_query="Where is temperature documented?",
+            case_id="case1",
+            user_id="user1",
+            case_version_id="vid1",
+            embedding_query="Where is temperature documented?\n\nTerms aligned with the stored case summary: febrile",
+            top_k=10,
+            use_adaptive=False,
+            merge_lexical_matches=True,
+            extra_lexical_terms=["febrile", "Temperature"],
+        )
+
+    assert len(embed_calls) == 1
+    assert "febrile" in embed_calls[0].lower()
+    ids = [r.chunk_id for r in results]
+    assert "cExtra" in ids
+
 
 def test_build_section_context(rag_retriever, mock_db):
     chunks = [
@@ -88,7 +218,9 @@ def test_build_section_context(rag_retriever, mock_db):
     ]
     
     with patch.object(rag_retriever, "retrieve_for_query", return_value=chunks):
-        context = rag_retriever.build_section_context(mock_db, "case1", "user1", [], query="test")
+        context = rag_retriever.build_section_context(
+            mock_db, "case1", "user1", [], query="test", use_adaptive_top_k=False
+        )
         assert "Text 1" in context.formatted_context
 
 

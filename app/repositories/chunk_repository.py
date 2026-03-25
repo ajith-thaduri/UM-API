@@ -1,6 +1,6 @@
 from typing import List, Optional, Dict, Any
 from sqlalchemy.orm import Session
-from sqlalchemy import text
+from sqlalchemy import text, or_
 
 from app.models.document_chunk import DocumentChunk, SectionType
 from app.models.case import Case
@@ -274,6 +274,41 @@ class ChunkRepository(BaseRepository[DocumentChunk]):
         
         return query.limit(limit).all()
 
+    def search_chunks_text_ilike(
+        self,
+        db: Session,
+        case_id: str,
+        user_id: str,
+        case_version_id: Optional[str],
+        substrings: List[str],
+        limit: int = 24,
+    ) -> List[DocumentChunk]:
+        """
+        Keyword-style match on chunk_text for the case version (OR of ILIKE patterns).
+        Intended for controlled clinical synonym lists merged with vector search.
+        """
+        vid = _resolve_case_version_id(db, case_id, case_version_id)
+        if not vid or not substrings:
+            return []
+        conds = []
+        for s in substrings:
+            t = (s or "").strip()
+            if len(t) < 2:
+                continue
+            conds.append(DocumentChunk.chunk_text.ilike(f"%{t}%"))
+        if not conds:
+            return []
+        return (
+            db.query(DocumentChunk)
+            .filter(
+                DocumentChunk.case_id == case_id,
+                DocumentChunk.user_id == user_id,
+                DocumentChunk.case_version_id == vid,
+                or_(*conds),
+            )
+            .limit(limit)
+            .all()
+        )
 
 
 # Singleton instance

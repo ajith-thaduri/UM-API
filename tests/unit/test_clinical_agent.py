@@ -62,6 +62,7 @@ async def test_extract_medications(clinical_agent, mock_db, mock_rag_context):
 async def test_extract_all_parallel(clinical_agent, mock_db, mock_rag_context):
     with patch("app.services.clinical_agent.rag_retriever.build_section_context", return_value=mock_rag_context), \
          patch("app.services.clinical_agent.prompt_service.render_prompt", return_value="Mock prompt"), \
+         patch("app.repositories.chunk_repository.chunk_repository.count_by_case", return_value=1), \
          patch.object(clinical_agent, "_call_llm", new_callable=AsyncMock) as mock_llm:
         
         # Mocking 6 LLM calls (meds, labs, diag, history, social, therapy)
@@ -100,3 +101,50 @@ def test_build_sources(clinical_agent, mock_rag_context):
     assert sources[0]["type"] == "medication"
     assert sources[0]["chunk_id"] == "chunk-1"
     assert sources[0]["file_id"] == "file-1"
+
+
+@pytest.mark.asyncio
+async def test_call_llm_retries_when_parsed_json_is_list_then_succeeds(clinical_agent):
+    mock_llm = MagicMock()
+    mock_llm.is_available.return_value = True
+    mock_llm.chat_completion = AsyncMock(
+        side_effect=[
+            ("[null, null]", {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12}),
+            ('{"medications": [], "allergies": []}', {"prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14}),
+        ]
+    )
+
+    with patch.object(clinical_agent, "_get_llm_service", return_value=mock_llm), \
+         patch("app.services.clinical_agent.prompt_service.get_system_message", return_value="system"), \
+         patch("app.services.llm_utils.extract_json_from_response", side_effect=[[None, None], {"medications": [], "allergies": []}]):
+        result = await clinical_agent._call_llm(
+            prompt="prompt",
+            prompt_id="meds_allergies_extraction",
+        )
+
+    assert result == {"medications": [], "allergies": []}
+    assert mock_llm.chat_completion.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_call_llm_returns_empty_dict_after_repeated_non_dict_json(clinical_agent):
+    mock_llm = MagicMock()
+    mock_llm.is_available.return_value = True
+    mock_llm.chat_completion = AsyncMock(
+        side_effect=[
+            ("[null]", {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}),
+            ("[null]", {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}),
+            ("[null]", {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}),
+        ]
+    )
+
+    with patch.object(clinical_agent, "_get_llm_service", return_value=mock_llm), \
+         patch("app.services.clinical_agent.prompt_service.get_system_message", return_value="system"), \
+         patch("app.services.llm_utils.extract_json_from_response", return_value=[None]):
+        result = await clinical_agent._call_llm(
+            prompt="prompt",
+            prompt_id="meds_allergies_extraction",
+        )
+
+    assert result == {}
+    assert mock_llm.chat_completion.await_count == 3

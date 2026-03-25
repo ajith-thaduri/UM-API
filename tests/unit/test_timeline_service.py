@@ -1,6 +1,7 @@
 import pytest
 from app.services.timeline_service import TimelineService
 from datetime import datetime
+from unittest.mock import patch
 
 @pytest.fixture
 def timeline_service():
@@ -67,3 +68,54 @@ def test_compute_vitals_per_day_ranges(timeline_service):
     assert isinstance(vitals_per_day[day1_key]["heart_rate"], dict)
     assert vitals_per_day[day1_key]["heart_rate"]["min"] == 70
     assert vitals_per_day[day1_key]["heart_rate"]["max"] == 90
+
+
+def test_filter_events_without_sources_accepts_source_file_id(timeline_service):
+    events = [
+        {
+            "id": "evt-1",
+            "date": "01/01/2024",
+            "event_type": "diagnosis",
+            "description": "Diagnosed: CHF",
+            "details": {"source_file_id": "file-123", "source_page": 2},
+        }
+    ]
+
+    filtered = timeline_service._filter_events_without_sources(events)
+
+    assert len(filtered) == 1
+
+
+def test_build_timeline_includes_rag_supplement_when_available(timeline_service):
+    supplement = [
+        {
+            "id": "evt-s1",
+            "date": "01/03/2024",
+            "event_type": "diagnosis",
+            "description": "Diagnosed: Pneumonia",
+            "source_file": "file-1",
+            "source_page": 3,
+            "details": {"rag_extracted": True},
+        }
+    ]
+
+    def _mock_run(coro):
+        coro.close()
+        return supplement
+
+    with patch.object(
+        timeline_service,
+        "_run_async_in_sync_context",
+        side_effect=_mock_run,
+    ) as mock_runner:
+        result = timeline_service.build_timeline(
+            extracted_data={"medications": [], "diagnoses": []},
+            raw_text="",
+            db=object(),
+            case_id="case-1",
+            user_id="user-1",
+        )
+
+    mock_runner.assert_called_once()
+    assert len(result["detailed"]) == 1
+    assert result["detailed"][0]["description"] == "Diagnosed: Pneumonia"

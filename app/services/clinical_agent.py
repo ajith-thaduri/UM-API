@@ -932,6 +932,30 @@ Admission information, chief complaint, and hospital course.
                             continue
                         raise
 
+                    # Clinical prompts must return a single JSON object with named keys
+                    # (e.g. {"medications": [...]}). OpenRouter sometimes returns a top-level
+                    # array; extract_all ignores non-dicts and timelines stay empty.
+                    if not isinstance(result, dict):
+                        _preview = str(result)[:160].replace("\n", " ")
+                        if len(str(result)) > 160:
+                            _preview += "…"
+                        if attempt < _MAX_LLM_RETRIES:
+                            logger.warning(
+                                "[LLM] Expected JSON object for extraction, got %s — retrying (%d/%d). Preview: %s",
+                                type(result).__name__,
+                                attempt + 1,
+                                _MAX_LLM_RETRIES + 1,
+                                _preview,
+                            )
+                            continue
+                        logger.warning(
+                            "[LLM] Expected JSON object, got %s after %d attempts — returning {}. Preview: %s",
+                            type(result).__name__,
+                            _MAX_LLM_RETRIES + 1,
+                            _preview,
+                        )
+                        return {}
+
                     # Track usage only on a successful parse.
                     if user_id and db:
                         try:

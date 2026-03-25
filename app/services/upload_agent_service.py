@@ -15,6 +15,7 @@ from app.core.config import settings
 from app.services.pdf_analyzer_service import PatientInfo, AnalysisResult, pdf_analyzer_service
 from app.models.upload_session import UploadSession as UploadSessionModel
 from app.repositories.upload_session_repository import UploadSessionRepository
+from app.services.upload_session_storage_cleanup import is_resumable_upload_state
 from app.services.llm.llm_factory import get_tier1_llm_service
 from app.services.llm_utils import extract_json_from_response
 from app.services.prompts import upload_prompts
@@ -86,6 +87,54 @@ class UserMessage:
         return asdict(self)
 
 
+def intake_quick_actions_for_message(
+    collected_data: Dict[str, Any],
+    missing_fields: List[str],
+    message_text: str,
+) -> List[QuickAction]:
+    """
+    Quick-reply buttons for structured intake (case #, request type, priority).
+
+    Substring-only matching failed when the LLM said e.g. "type of request" instead of
+    "request type", or mentioned "case number" in the same turn as a follow-up question.
+    We primarily key off the next missing REQUIRED field, with message phrases as backup.
+    """
+    next_field = missing_fields[0] if missing_fields else None
+    msg_l = (message_text or "").lower()
+
+    if not collected_data.get("case_number") and (
+        next_field == "case_number" or "case number" in msg_l
+    ):
+        random_case = f"UM-{uuid.uuid4().hex[:6].upper()}"
+        return [
+            QuickAction(f"Use {random_case}", random_case),
+            QuickAction("I'll provide one", "I'll provide one"),
+        ]
+    if not collected_data.get("request_type") and (
+        next_field == "request_type"
+        or "request type" in msg_l
+        or "type of request" in msg_l
+        or "type of review" in msg_l
+        or "kind of request" in msg_l
+        or "inpatient or outpatient" in msg_l
+    ):
+        return [
+            QuickAction("Inpatient", "Inpatient"),
+            QuickAction("Outpatient", "Outpatient"),
+            QuickAction("DME", "DME"),
+            QuickAction("Pharmacy", "Pharmacy"),
+        ]
+    if not collected_data.get("priority") and (
+        next_field == "priority" or "priority" in msg_l or "urgency" in msg_l
+    ):
+        return [
+            QuickAction("Routine", "Routine"),
+            QuickAction("Expedited", "Expedited"),
+            QuickAction("Urgent", "Urgent", variant="destructive"),
+        ]
+    return []
+
+
 class UploadAgentService:
     """Conversational agent for managing the upload flow - LLM Powered"""
     
@@ -126,6 +175,17 @@ class UploadAgentService:
     def get_session(self, db: Session, session_id: str) -> Optional[UploadSessionModel]:
         """Get session by ID"""
         return self.repository.get_by_id(db, session_id)
+
+    def list_resumable_drafts(self, db: Session, user_id: str) -> List[UploadSessionModel]:
+        """Sessions the user can continue (no case yet, resumable state, at least one uploaded file)."""
+        rows = self.repository.get_by_user(db, user_id)
+        return [
+            s
+            for s in rows
+            if s.case_id is None
+            and is_resumable_upload_state(s.state)
+            and len(s.files or []) > 0
+        ]
 
     async def handle_files_uploaded(
         self, 
@@ -204,7 +264,25 @@ class UploadAgentService:
             }
             for f in valid_files
         ]
-        
+
+        # Mirror the UI "Uploading …" line so refresh/resume shows the user's upload turn.
+        names = [f.get("name") or "file" for f in (session.files or [])]
+        n = len(names)
+        upload_caption = (
+            f"Uploading {n} file{'s' if n != 1 else ''}: {', '.join(names)}"
+            if names
+            else "Uploading files"
+        )
+        user_upload_row = UserMessage(
+            id=str(uuid.uuid4()),
+            message=upload_caption,
+            timestamp=datetime.utcnow().isoformat(),
+            files=names,
+        )
+        msgs_upload = list(session.messages or [])
+        msgs_upload.append({"role": "user", **user_upload_row.to_dict()})
+        session.messages = msgs_upload
+
         # 2. Merge initial extraction result into session
         if analysis_result.patient_info:
             p_info = dict(session.patient_info) if session.patient_info else {}
@@ -243,66 +321,74 @@ class UploadAgentService:
         return self._show_analysis_summary(db, session, analysis_result)
 
     async def process_message(
-        self, 
+        self,
         db: Session,
-        session_id: str, 
-        user_message: str
+        session_id: str,
+        user_message: str,
     ) -> AgentMessage:
-        """Process a user message and return agent response"""
+        """
+        Process a user message. By default runs the LangGraph orchestrator (`upload_agent_graph`).
+        Set `settings.USE_UPLOAD_LANGGRAPH=False` to use the legacy linear implementation.
+        """
+        if settings.USE_UPLOAD_LANGGRAPH:
+            from app.services.upload_agent_graph import invoke_upload_message
+
+            return await invoke_upload_message(db, session_id, user_message)
+        return await self._process_message_legacy(db, session_id, user_message)
+
+    async def _process_message_legacy(
+        self,
+        db: Session,
+        session_id: str,
+        user_message: str,
+    ) -> AgentMessage:
+        """Pre-LangGraph orchestration (rollback / scripts)."""
         session = self.repository.get_by_id(db, session_id)
         if not session:
             return self._error_message("Session not found. Please start over.")
-        
-        # 1. Record user message
+
         user_msg = UserMessage(
             id=str(uuid.uuid4()),
             message=user_message,
-            timestamp=datetime.utcnow().isoformat()
+            timestamp=datetime.utcnow().isoformat(),
         )
-        
+
         messages = list(session.messages or [])
         messages.append({"role": "user", **user_msg.to_dict()})
         session.messages = messages
         session.updated_at = datetime.utcnow()
         db.commit()
-        
-        # 2. Handle specific states that might supersede the Agent loop
+
         if session.state == ConversationState.WAITING_FOR_FILES.value:
-             return AgentMessage(
+            agent_msg = AgentMessage(
                 id=str(uuid.uuid4()),
                 message="I'm waiting for you to upload some files first. Please upload your PDFs.",
                 type=MessageType.QUESTION,
-                timestamp=datetime.utcnow().isoformat()
+                timestamp=datetime.utcnow().isoformat(),
             )
-            
+            msgs = list(session.messages or [])
+            msgs.append({"role": "agent", **agent_msg.to_dict()})
+            session.messages = msgs
+            session.updated_at = datetime.utcnow()
+            db.commit()
+            return agent_msg
+
         if session.state == ConversationState.CONFIRM_ANALYSIS.value:
-            # Check for confirmation
             msg_lower = user_message.lower().strip()
             if msg_lower in ["yes", "yes, looks good", "looks good", "correct", "confirm"]:
-                # Transition to COLLECTING_DATA
                 session.state = ConversationState.COLLECTING_DATA.value
                 db.commit()
-                # Continue to generate agent response (asking for missing items)
             else:
-                 # User wants to edit.
-                 # We'll transition to COLLECTING_DATA but we pass the user's message 
-                 # (which might contain the correction) to the Agent.
-                 session.state = ConversationState.COLLECTING_DATA.value
-                 db.commit()
-                 # Fall through
-                 
+                session.state = ConversationState.COLLECTING_DATA.value
+                db.commit()
+
         if session.state == ConversationState.REVIEW_SUMMARY.value:
-            # Simple keyword check for confirmation to start processing
             msg_lower = user_message.lower().strip()
             if msg_lower in ["yes", "start", "process", "start processing", "confirm", "go", "looks good"]:
-                 return self._start_processing_message(db, session)
-            else:
-                # User wants to change something, go back to collecting data
-                session.state = ConversationState.COLLECTING_DATA.value
-                db.commit()
-                # Fall through to Agent loop
-        
-        # 3. Generate Agent Response via LLM
+                return self._start_processing_message(db, session)
+            session.state = ConversationState.COLLECTING_DATA.value
+            db.commit()
+
         return await self._generate_and_save_agent_response(db, session)
 
     async def _generate_and_save_agent_response(
@@ -431,38 +517,21 @@ class UploadAgentService:
 
             # G. Construct Agent Message
             message_text = result.get("message", "I didn't quite catch that.")
-            
-            # Add actions if suitable (e.g. if asking for priority)
-            actions = []
-            # Heuristic actions
-            if "case number" in message_text.lower() and not collected_data.get("case_number"):
-                # Suggest a readable case number
-                random_case = f"UM-{uuid.uuid4().hex[:6].upper()}"
-                actions = [
-                    QuickAction(f"Use {random_case}", random_case),
-                    QuickAction("I'll provide one", "I'll provide one")
-                ]
-            elif "request type" in message_text.lower() and not collected_data.get("request_type"):
-                 actions = [
-                     QuickAction("Inpatient", "Inpatient"),
-                     QuickAction("Outpatient", "Outpatient"),
-                     QuickAction("DME", "DME"),
-                     QuickAction("Pharmacy", "Pharmacy")
-                 ]
-            elif ("priority" in message_text.lower() or "urgency" in message_text.lower()) and not collected_data.get("priority"):
-                actions = [
-                    QuickAction("Routine", "Routine"),
-                    QuickAction("Expedited", "Expedited"),
-                    QuickAction("Urgent", "Urgent", variant="destructive")
-                ]
-            
+
+            # Next field we're collecting (drives UI e.g. date picker); omit on summary/confirmation flows
+            next_field = missing_fields[0] if missing_fields else None
+            actions = intake_quick_actions_for_message(
+                collected_data, missing_fields, message_text
+            )
+
             agent_msg = AgentMessage(
                 id=str(uuid.uuid4()),
                 message=message_text,
                 type=MessageType.QUESTION,
                 timestamp=datetime.utcnow().isoformat(),
                 actions=actions,
-                extracted_data=updates
+                extracted_data=updates,
+                current_field=next_field,
             )
             
             # Save
@@ -544,7 +613,8 @@ class UploadAgentService:
             actions=[
                 QuickAction(label="Start Processing", value="start", variant="primary"),
                 QuickAction(label="Edit Details", value="edit", variant="secondary")
-            ]
+            ],
+            current_field=None,
         )
         
         msgs = list(session.messages or [])
@@ -559,14 +629,20 @@ class UploadAgentService:
         session.processing_status = "ready_to_start"
         session.state = ConversationState.PROCESSING.value
         db.commit()
-        
-        return AgentMessage(
+
+        agent_msg = AgentMessage(
             id=str(uuid.uuid4()),
             message="Starting now! I'll extract clinical data, build the timeline, and generate your UM summary. This usually takes about a minute...",
             type=MessageType.STATUS,
             timestamp=datetime.utcnow().isoformat(),
-            progress=0
+            progress=0,
         )
+        msgs = list(session.messages or [])
+        msgs.append({"role": "agent", **agent_msg.to_dict()})
+        session.messages = msgs
+        session.updated_at = datetime.utcnow()
+        db.commit()
+        return agent_msg
     
     def update_processing_status(
         self, 

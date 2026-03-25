@@ -106,3 +106,34 @@ def test_prompt_service_missing_prompt(db):
     
     template = service.get_prompt_template("non-existent-prompt")
     assert template is None
+
+
+def test_prompt_service_refreshes_stale_cache(db):
+    """Prompt cache should reload after TTL so DB prompt edits propagate to workers."""
+    service = PromptService()
+    service.CACHE_TTL_SECONDS = 0
+    service._get_db = lambda: db
+
+    original = MagicMock(
+        id="stale-cache-prompt",
+        template="Original {value}",
+        system_message="Original system",
+        variables=["value"],
+        name="Prompt",
+        category="test",
+    )
+    updated = MagicMock(
+        id="stale-cache-prompt",
+        template="Updated {value}",
+        system_message="Updated system",
+        variables=["value"],
+        name="Prompt",
+        category="test",
+    )
+
+    with patch("app.services.prompt_service.prompt_repository.get_all", side_effect=[[original], [updated]]) as mock_get_all:
+        service.refresh_cache()
+        assert service.get_prompt_template("stale-cache-prompt") == "Original {value}"
+        assert service.get_system_message("stale-cache-prompt") == "Updated system"
+
+    assert mock_get_all.call_count >= 2

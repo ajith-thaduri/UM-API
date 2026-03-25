@@ -1,10 +1,12 @@
 """Prompt service for managing and rendering prompts from the database"""
 
+import threading
+import time
 import logging
 import re
 from typing import Dict, Any, Optional
+
 from sqlalchemy.orm import Session
-import threading
 
 from app.repositories.prompt_repository import prompt_repository
 from app.db.session import SessionLocal
@@ -14,9 +16,12 @@ logger = logging.getLogger(__name__)
 class PromptService:
     """Service for retrieving and rendering prompts with caching"""
 
+    CACHE_TTL_SECONDS = 60.0
+
     def __init__(self):
         self._cache: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.Lock()
+        self._last_refresh_at = 0.0
 
     def _get_db(self):
         return SessionLocal()
@@ -28,8 +33,13 @@ class PromptService:
         # periodically or when an update occurs.
         try:
             with self._lock:
-                if not self._cache:
-                    logger.info("Initializing prompt cache from database")
+                now = time.monotonic()
+                should_reload = (
+                    not self._cache
+                    or (now - self._last_refresh_at) >= self.CACHE_TTL_SECONDS
+                )
+                if should_reload:
+                    logger.info("Refreshing prompt cache from database")
                     all_prompts = prompt_repository.get_all(db, filters={"is_active": True})
                     new_cache = {}
                     for p in all_prompts:
@@ -41,6 +51,7 @@ class PromptService:
                             "category": p.category
                         }
                     self._cache = new_cache
+                    self._last_refresh_at = now
         except Exception as e:
             logger.error(f"Error refreshing prompt cache: {e}")
 
@@ -55,6 +66,7 @@ class PromptService:
         }
         with self._lock:
             self._cache[prompt_id] = data
+            self._last_refresh_at = time.monotonic()
         return data
 
     def get_prompt_template(self, prompt_id: str) -> Optional[str]:
@@ -117,6 +129,7 @@ class PromptService:
         """Force a cache refresh"""
         with self._lock:
             self._cache = {} # Clear cache to trigger reload on next access
+            self._last_refresh_at = 0.0
 
 # Singleton instance
 prompt_service = PromptService()

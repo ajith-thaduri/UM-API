@@ -2,6 +2,8 @@
 
 import re
 import json
+import asyncio
+import concurrent.futures
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import uuid
@@ -27,6 +29,24 @@ logger = logging.getLogger(__name__)
 
 class TimelineService:
     """Service for constructing chronological clinical timelines with hybrid RAG"""
+
+    def _run_async_in_sync_context(self, coro):
+        """
+        Run an async coroutine from this synchronous service.
+
+        `build_timeline()` is invoked from both synchronous call paths and
+        async workers (sometimes inside `asyncio.to_thread`). If an event loop
+        is already running in the current thread we hop to a one-off worker
+        thread; otherwise we can safely use `asyncio.run`.
+        """
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coro)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(lambda: asyncio.run(coro))
+            return future.result()
 
     def build_timeline(
         self,
@@ -90,15 +110,26 @@ class TimelineService:
                     sample_med = extracted_data['medications'][0]
                     logger.warning(f"Sample medication keys: {list(sample_med.keys()) if isinstance(sample_med, dict) else 'not a dict'}, has date: {bool(self._get_date(sample_med)) if isinstance(sample_med, dict) else False}")
 
-        # Supplement: Use RAG to find additional date-related events
-        # Note: This is called from asyncio.to_thread, so we can't use await directly
-        # We'll skip RAG supplement in this context to avoid async complexity
-        # RAG supplement can be added as a separate async step if needed
+        # Supplement: use date-rich RAG context to recover timeline events that
+        # structured extraction may miss (for example diagnoses/procedures where
+        # the LLM extracted the fact but omitted a usable date field).
         if db and case_id and user_id:
             try:
-                # Skip async RAG supplement when called from thread pool
-                # This is a trade-off for performance - RAG supplement is optional
-                logger.debug("Skipping RAG supplement in synchronous context")
+                additional_events = self._run_async_in_sync_context(
+                    self._supplement_with_rag(
+                        db=db,
+                        case_id=case_id,
+                        user_id=user_id,
+                        existing_events=timeline_events,
+                    )
+                )
+                if additional_events:
+                    timeline_events.extend(additional_events)
+                    logger.info(
+                        "Timeline RAG supplement added %d additional events for case %s",
+                        len(additional_events),
+                        case_id,
+                    )
             except Exception as e:
                 logger.warning(f"RAG supplement skipped: {e}")
 
@@ -1450,15 +1481,70 @@ class TimelineService:
                 logger.warning(f"Failed to parse JSON response from LLM: {e}. Response: {response[:200] if response else 'Empty'}")
                 return additional_events  # Return empty list if parsing fails
             
+            def _normalize_text(value: object) -> str:
+                return " ".join(str(value or "").lower().split())
+
+            def _date_variants(raw_date: object) -> List[str]:
+                text = str(raw_date or "").strip()
+                if not text:
+                    return []
+                variants = {text.lower()}
+                normalized = self._normalize_date_format(text)
+                if normalized:
+                    variants.add(normalized.lower())
+                    mm, dd, yyyy = normalized.split("/")
+                    variants.add(f"{mm}-{dd}-{yyyy}")
+                    variants.add(f"{yyyy}-{mm}-{dd}")
+                return [v for v in variants if v]
+
+            def _best_chunk_for_event(event: Dict[str, object]):
+                description = _normalize_text(event.get("description"))
+                if not description:
+                    return None
+                keywords = [
+                    token
+                    for token in re.findall(r"[a-z0-9]+", description)
+                    if len(token) >= 4 and token not in {"patient", "clinical"}
+                ]
+                best_chunk = None
+                best_score = 0
+                for chunk in chunks:
+                    chunk_text = _normalize_text(getattr(chunk, "chunk_text", ""))
+                    if not chunk_text:
+                        continue
+                    score = 0
+                    for token in keywords[:8]:
+                        if token in chunk_text:
+                            score += 2
+                    for dv in _date_variants(event.get("date")):
+                        if dv in chunk_text:
+                            score += 5
+                            break
+                    event_type = _normalize_text(event.get("event_type"))
+                    if event_type and event_type.replace("_", " ") in chunk_text:
+                        score += 1
+                    if score > best_score:
+                        best_score = score
+                        best_chunk = chunk
+                return best_chunk if best_score > 0 else None
+
             for event in result.get("events", []):
                 if event.get("date"):
+                    best_chunk = _best_chunk_for_event(event)
+                    if not best_chunk:
+                        continue
                     additional_events.append({
                         "id": str(uuid.uuid4()),
                         "date": event["date"],
                         "event_type": event.get("event_type", "event"),
                         "description": event.get("description", ""),
                         "source": "rag_supplement",
-                        "details": {"rag_extracted": True}
+                        "details": {
+                            "rag_extracted": True,
+                            "chunk_id": best_chunk.chunk_id,
+                        },
+                        "source_file": best_chunk.file_id,
+                        "source_page": best_chunk.page_number,
                     })
                     
         except Exception as e:
@@ -1615,9 +1701,12 @@ class TimelineService:
                 continue
             
             # Check for source_file (can be at event level or in details)
-            source_file = event.get("source_file")
+            source_file = event.get("source_file") or event.get("source_file_id")
             if not source_file and isinstance(event.get("details"), dict):
-                source_file = event.get("details", {}).get("source_file")
+                source_file = (
+                    event.get("details", {}).get("source_file")
+                    or event.get("details", {}).get("source_file_id")
+                )
             
             # Check for source_page (can be at event level, as source_page, page_number, or in details)
             source_page = event.get("source_page") or event.get("page_number")

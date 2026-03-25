@@ -1,6 +1,7 @@
 """RAG API endpoints for follow-up questions and chunk retrieval"""
 
 import json
+import logging
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
@@ -19,6 +20,7 @@ from app.api.endpoints.auth import get_current_user
 from app.models.user import User
 
 router = APIRouter(tags=["rag"])
+logger = logging.getLogger(__name__)
 
 
 # Request/Response Models
@@ -45,6 +47,8 @@ class TraceStep(BaseModel):
     id: str
     label: str
     status: str = "done"
+    tool: Optional[str] = None
+    detail: Optional[str] = None
 
 
 class QueryResponse(BaseModel):
@@ -61,6 +65,7 @@ class QueryResponse(BaseModel):
     structured_blocks: Optional[Dict[str, Any]] = None
     resolved_intent: Optional[str] = None
     show_trace: bool = True
+    telemetry: Optional[Dict[str, Any]] = None
 
 
 class ConversationMessage(BaseModel):
@@ -199,6 +204,7 @@ async def query_dashboard(
             structured_blocks=response.structured_blocks,
             resolved_intent=response.resolved_intent,
             show_trace=response.show_trace,
+            telemetry=response.telemetry,
         )
         
     except Exception as e:
@@ -209,7 +215,11 @@ async def query_dashboard(
                 status_code=503,
                 detail="The AI service is temporarily overloaded. Please try again in a moment.",
             )
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("Dashboard query failed: %s", e)
+        raise HTTPException(
+            status_code=500,
+            detail="Something went wrong while answering your question. Please try again.",
+        )
 
 
 @router.post("/dashboard/{case_id}/query/stream")
@@ -261,7 +271,12 @@ async def query_dashboard_stream(
                     "status": 503,
                 }
             else:
-                payload = {"type": "error", "detail": str(e), "status": 500}
+                logger.exception("Dashboard query stream failed: %s", e)
+                payload = {
+                    "type": "error",
+                    "detail": "Something went wrong while answering your question. Please try again.",
+                    "status": 500,
+                }
             yield (json.dumps(payload) + "\n").encode("utf-8")
 
     return StreamingResponse(

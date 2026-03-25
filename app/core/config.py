@@ -120,7 +120,10 @@ class Settings(BaseSettings):
     # Medical Document Guardrail Configuration
     ENABLE_MEDICAL_GUARDRAIL: bool = True  # Enable/disable non-medical document blocking
     GUARDRAIL_STRICT_MODE: bool = True  # If True, reject entire batch if ANY file is non-medical. If False, only reject invalid files.
-    
+
+    # Upload intake agent — LangGraph orchestration for /upload/agent/message (set False for legacy linear flow).
+    USE_UPLOAD_LANGGRAPH: bool = True
+
     # Reranking Configuration
     ENABLE_RERANKING: bool = True
     RERANKING_MODEL: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"

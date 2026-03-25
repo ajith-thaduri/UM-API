@@ -1,7 +1,8 @@
 """RAG retriever service for semantic search and context building"""
 
 import logging
-from typing import List, Dict, Optional, Any
+import re
+from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass
 from sqlalchemy.orm import Session
 
@@ -12,6 +13,44 @@ from app.repositories.chunk_repository import chunk_repository
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+# When the user asks about an acronym, vector search alone often misses chunks that only spell out the long form.
+_CLINICAL_LEXICAL_GROUPS: List[Tuple[re.Pattern, List[str]]] = [
+    (
+        re.compile(
+            r"\becg\b|\bekg\b|\belectrocardiogram\b|\be\.?k\.?g\.?\b",
+            re.IGNORECASE,
+        ),
+        ["ECG", "EKG", "electrocardiogram"],
+    ),
+    (
+        re.compile(r"\bcxr\b|\bchest\s+x-?ray\b|\bchest\s+radiograph", re.IGNORECASE),
+        ["CXR", "chest x-ray", "chest radiograph"],
+    ),
+    (
+        re.compile(r"\bmri\b|\bmagnetic\s+resonance", re.IGNORECASE),
+        ["MRI", "magnetic resonance"],
+    ),
+    (
+        re.compile(
+            r"\bct\s+scan\b|\bcomputed\s+tomography\b|\bcta\b|\bc\.?t\.?\s+scan\b",
+            re.IGNORECASE,
+        ),
+        ["CT scan", "computed tomography", "CTA"],
+    ),
+    (
+        re.compile(r"\bcbc\b|\bcomplete\s+blood\s+count\b", re.IGNORECASE),
+        ["CBC", "complete blood count"],
+    ),
+    (
+        re.compile(r"\bbmp\b|\bbasic\s+metabolic\b|\bcmp\b|\bcomprehensive\s+metabolic\b", re.IGNORECASE),
+        ["BMP", "basic metabolic", "CMP", "comprehensive metabolic"],
+    ),
+    (
+        re.compile(r"\btroponin\b", re.IGNORECASE),
+        ["troponin", "TnI", "TnT"],
+    ),
+]
 
 # Lazy import for reranking (optional dependency)
 _reranker = None
@@ -114,6 +153,70 @@ class RAGRetriever:
         # Clamp to min/max
         return max(min_top_k, min(adaptive_k, max_top_k))
 
+    @staticmethod
+    def clinical_lexical_terms_from_query(query: str) -> List[str]:
+        """Return ILIKE substrings to merge with vector search (deduped, capped)."""
+        out: List[str] = []
+        for pat, terms in _CLINICAL_LEXICAL_GROUPS:
+            if pat.search(query or ""):
+                out.extend(terms)
+        seen: set[str] = set()
+        uniq: List[str] = []
+        for t in out:
+            k = t.lower()
+            if k not in seen:
+                seen.add(k)
+                uniq.append(t)
+        return uniq[:16]
+
+    def _expand_query_for_embedding(self, query: str) -> str:
+        terms = self.clinical_lexical_terms_from_query(query)
+        if not terms:
+            return query
+        return f"{query}\n\nRelated clinical terms: {' '.join(terms)}"
+
+    def _merge_lexical_chunks(
+        self,
+        db: Session,
+        case_id: str,
+        user_id: str,
+        case_version_id: Optional[str],
+        retrieved: List[RetrievedChunk],
+        ilike_terms: List[str],
+        lexical_limit: int,
+    ) -> List[RetrievedChunk]:
+        if not ilike_terms:
+            return retrieved
+        raw = chunk_repository.search_chunks_text_ilike(
+            db, case_id, user_id, case_version_id, ilike_terms, limit=lexical_limit
+        )
+        if not raw:
+            return retrieved
+        have = {r.chunk_id for r in retrieved}
+        for ch in raw:
+            if ch.id in have:
+                continue
+            have.add(ch.id)
+            # Score above default vector placeholder (0.9) so keyword hits survive sort + token budget
+            retrieved.append(
+                RetrievedChunk(
+                    chunk_id=ch.id,
+                    vector_id=ch.vector_id,
+                    case_id=ch.case_id,
+                    file_id=ch.file_id,
+                    page_number=ch.page_number,
+                    section_type=ch.section_type,
+                    chunk_text=ch.chunk_text,
+                    score=0.97,
+                    char_start=ch.char_start,
+                    char_end=ch.char_end,
+                    token_count=ch.token_count,
+                    bbox=ch.bbox,
+                    word_segments=ch.word_segments,
+                )
+            )
+        return retrieved
+
     def retrieve_for_query(
         self,
         db: Session,
@@ -123,6 +226,7 @@ class RAGRetriever:
         top_k: Optional[int] = None,  # Final number of results after reranking (optional for adaptive)
         use_adaptive: bool = True,  # Enable adaptive top_k based on document size
         case_version_id: Optional[str] = None,
+        merge_lexical_matches: bool = True,
     ) -> List[RetrievedChunk]:
         """
         Retrieve relevant chunks for a query - all chunks, no section filtering
@@ -149,9 +253,9 @@ class RAGRetriever:
                 logger.info(f"Using adaptive top_k={top_k} for case {case_id}")
             elif top_k is None:
                 top_k = adaptive_k
-        
-        # Generate query embedding
-        query_embedding = embedding_service.generate_query_embedding(query)
+
+        embed_text = self._expand_query_for_embedding(query) if merge_lexical_matches else query
+        query_embedding = embedding_service.generate_query_embedding(embed_text)
         
         # Query PGVector - get more results if reranking is enabled
         initial_top_k = settings.RERANKING_TOP_K if settings.ENABLE_RERANKING else top_k
@@ -188,7 +292,19 @@ class RAGRetriever:
                 bbox=chunk.bbox,
                 word_segments=chunk.word_segments,
             ))
-        
+
+        lex_terms = self.clinical_lexical_terms_from_query(query) if merge_lexical_matches else []
+        if lex_terms:
+            retrieved = self._merge_lexical_chunks(
+                db,
+                case_id,
+                user_id,
+                case_version_id,
+                retrieved,
+                lex_terms,
+                lexical_limit=max(top_k * 2, 24),
+            )
+
         # Apply reranking if enabled
         if settings.ENABLE_RERANKING and len(retrieved) > top_k:
             retrieved = self._rerank_chunks(query, retrieved, top_k)
@@ -196,9 +312,108 @@ class RAGRetriever:
             # Sort by score (highest first)
             retrieved.sort(key=lambda x: x.score, reverse=True)
             retrieved = retrieved[:top_k]
-        
+
         return retrieved
-    
+
+    def retrieve_for_evidence_search(
+        self,
+        db: Session,
+        primary_query: str,
+        case_id: str,
+        user_id: str,
+        case_version_id: Optional[str],
+        *,
+        embedding_query: Optional[str] = None,
+        top_k: int = 24,
+        use_adaptive: bool = False,
+        merge_lexical_matches: bool = True,
+        extra_lexical_terms: Optional[List[str]] = None,
+    ) -> List[RetrievedChunk]:
+        """
+        Case-agent document lookup: vector search uses summary-guided embedding text; lexical OR-merge
+        uses user question clinical hints plus generic summary-aligned terms (ILIKE).
+        Reranking still uses the user's primary question for stability.
+        """
+        eq = (embedding_query or primary_query or "").strip()
+        pq = (primary_query or "").strip()
+
+        embed_text = self._expand_query_for_embedding(eq) if merge_lexical_matches else eq
+        query_embedding = embedding_service.generate_query_embedding(embed_text)
+
+        initial_top_k = settings.RERANKING_TOP_K if settings.ENABLE_RERANKING else top_k
+        matches = pgvector_service.query_case_chunks(
+            query_vector=query_embedding,
+            case_id=case_id,
+            user_id=user_id,
+            top_k=initial_top_k,
+            case_version_id=case_version_id,
+        )
+
+        vector_ids = [m.vector_id for m in matches]
+        db_chunks = chunk_repository.get_by_vector_ids(db, vector_ids)
+        score_lookup = {m.vector_id: m.score for m in matches}
+
+        retrieved: List[RetrievedChunk] = []
+        for chunk in db_chunks:
+            retrieved.append(
+                RetrievedChunk(
+                    chunk_id=chunk.id,
+                    vector_id=chunk.vector_id,
+                    case_id=chunk.case_id,
+                    file_id=chunk.file_id,
+                    page_number=chunk.page_number,
+                    section_type=chunk.section_type,
+                    chunk_text=chunk.chunk_text,
+                    score=score_lookup.get(chunk.vector_id, 0.0),
+                    char_start=chunk.char_start,
+                    char_end=chunk.char_end,
+                    token_count=chunk.token_count,
+                    bbox=chunk.bbox,
+                    word_segments=chunk.word_segments,
+                )
+            )
+
+        lex_terms: List[str] = []
+        if merge_lexical_matches:
+            lex_terms.extend(self.clinical_lexical_terms_from_query(pq))
+            if eq != pq:
+                lex_terms.extend(self.clinical_lexical_terms_from_query(eq))
+        if extra_lexical_terms:
+            for t in extra_lexical_terms:
+                tt = (t or "").strip()
+                if len(tt) >= 2:
+                    lex_terms.append(tt)
+
+        seen_lex: set[str] = set()
+        uniq_lex: List[str] = []
+        for t in lex_terms:
+            k = t.lower()
+            if k in seen_lex or len(k) < 2:
+                continue
+            seen_lex.add(k)
+            uniq_lex.append(t.strip())
+            if len(uniq_lex) >= 28:
+                break
+
+        if uniq_lex:
+            retrieved = self._merge_lexical_chunks(
+                db,
+                case_id,
+                user_id,
+                case_version_id,
+                retrieved,
+                uniq_lex,
+                lexical_limit=max(top_k * 2, 32),
+            )
+
+        if settings.ENABLE_RERANKING and len(retrieved) > top_k:
+            retrieved = self._rerank_chunks(pq, retrieved, top_k)
+        else:
+            retrieved.sort(key=lambda x: x.score, reverse=True)
+            retrieved = retrieved[:top_k]
+
+        return retrieved
+
     def _rerank_chunks(
         self,
         query: str,

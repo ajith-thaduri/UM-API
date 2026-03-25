@@ -1,7 +1,8 @@
 """Pydantic schemas for Upload Agent API"""
 
 from typing import List, Optional, Dict, Any
-from pydantic import BaseModel, ConfigDict
+from datetime import datetime
+from pydantic import BaseModel, ConfigDict, Field
 from enum import Enum
 
 
@@ -141,4 +142,26 @@ class ConfirmUploadResponse(BaseModel):
     case_id: str
     message: AgentMessageResponse
     processing_started: bool = True
+
+
+class UploadDraftSummaryResponse(BaseModel):
+    """One resumable upload draft (no case linked yet)."""
+
+    session_id: str
+    updated_at: datetime
+    state: ConversationStateEnum
+    file_count: int
+    patient_name_snippet: Optional[str] = None
+
+
+class ResumeUploadSessionResponse(BaseModel):
+    """Bootstrap payload to hydrate the upload UI without starting a new session."""
+
+    session_id: str
+    state: ConversationStateEnum
+    patient_info: PatientInfoResponse
+    messages: List[Dict[str, Any]]
+    file_count: int = 0
+    # Sanitized file list for the document vault (no storage paths).
+    files: List[FileInfoResponse] = Field(default_factory=list)
 

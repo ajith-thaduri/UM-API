@@ -1,11 +1,10 @@
 """
-LangGraph-based case agent: explicit nodes, stream-friendly updates.
-Tier-1 LLM only; Claude artifacts preloaded from DB via case context bundle.
+LangGraph-based case agent: narrative-first staged flow, stream-friendly updates.
+Tier-1 LLM only; Tier-2 narrative is read from DB via CaseAgentContextBundle.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import operator
 from typing import Annotated, Any, AsyncIterator, Dict, List, Optional, TypedDict
@@ -21,9 +20,10 @@ from app.services.case_agent_service import (
     _extract_suggested_actions,
     _try_deterministic_answer,
     build_compare_enrichment,
+    build_evidence_search_plan,
     classify_intent,
     context_aware_suggestions,
-    retrieval_policy,
+    format_search_plan_for_prompt,
     should_retry_with_retrieval,
 )
 
@@ -40,13 +40,10 @@ def _step(
     label: str,
     status: str = "done",
     detail: Optional[str] = None,
-    tool: Optional[str] = None,
 ) -> Dict[str, Any]:
     row: Dict[str, Any] = {"id": sid, "label": label, "status": status}
     if detail:
         row["detail"] = detail
-    if tool:
-        row["tool"] = tool
     return row
 
 
@@ -64,6 +61,8 @@ class CaseAgentState(TypedDict, total=False):
     active_version_summary: Optional[Dict[str, Any]]
     context_summary: Optional[str]
     suggested_actions: List[str]
+    need_retrieval: bool
+    telemetry: Dict[str, Any]
 
 
 class CaseAgentGraphRunner:
@@ -79,6 +78,7 @@ class CaseAgentGraphRunner:
         include_dashboard_context: bool,
         case_version_id: Optional[str],
         llm_answer_fn: LLMCaller,
+        working_memory_text: str = "",
     ):
         self.db = db
         self.case_id = case_id
@@ -88,18 +88,21 @@ class CaseAgentGraphRunner:
         self.include_dashboard_context = include_dashboard_context
         self.case_version_id = case_version_id
         self.llm_answer_fn = llm_answer_fn
+        self.working_memory_text = (working_memory_text or "").strip()
         self.ctx: Any = None
         self.intent: str = "general_case_qa"
         self._revision_extra: str = ""
         self._rag_context: Any = None
+        self._used_initial_retrieval: bool = False
+        self._evidence_search_plan: Any = None
 
     async def node_load_context(self, state: CaseAgentState) -> Dict[str, Any]:
         self.ctx = build_case_agent_context(self.db, self.case_id, self.user_id, self.case_version_id)
         if not self.ctx:
             return {
                 "trace_steps": [
-                    _step("load_case", "Reading case and selected version", tool="load_case_context"),
-                    _step("error", "Context load failed", "error"),
+                    _step("load_case", "Opening this case and version", "error"),
+                    _step("error", "Could not load case context", "error"),
                 ],
                 "short_circuit": True,
                 "answer": "Case or version context could not be loaded.",
@@ -107,6 +110,7 @@ class CaseAgentGraphRunner:
                 "sources": [],
                 "chunks_used": [],
                 "resolved_intent": "error",
+                "telemetry": {"error": "context_load_failed"},
             }
         has_revision = bool(self.ctx.revision_impact_report or self.ctx.change_summary)
         active_summary = {
@@ -118,8 +122,8 @@ class CaseAgentGraphRunner:
         }
         return {
             "trace_steps": [
-                _step("load_case", "Reading case and selected version", tool="load_case_context"),
-                _step("load_versions", "Checking live version and lineage", tool="load_version_context"),
+                _step("load_case", "Reading case and selected version"),
+                _step("versions", "Checking version history"),
             ],
             "active_version_summary": active_summary,
             "sources": [],
@@ -133,10 +137,9 @@ class CaseAgentGraphRunner:
         det_answer, structured_blocks = _try_deterministic_answer(self.question, self.ctx, self.intent)
         trace = [
             _step(
-                "intent",
-                f"Classified intent: {self.intent.replace('_', ' ')}",
-                tool="classify_intent",
-                detail=self.intent,
+                "routing",
+                "Understanding your question",
+                detail=self.intent.replace("_", " "),
             )
         ]
         if det_answer is not None:
@@ -145,7 +148,7 @@ class CaseAgentGraphRunner:
             )
             is_simple = self.intent in _SIMPLE_INTENTS
             if not is_simple:
-                trace.append(_step("compose", "Composing grounded answer", tool="answer_composer"))
+                trace.append(_step("compose", "Preparing answer"))
             used = list(dict.fromkeys(self.ctx.used_artifact_keys))
             return {
                 "trace_steps": trace,
@@ -160,21 +163,22 @@ class CaseAgentGraphRunner:
                 ),
                 "context_summary": f"v{self.ctx.selected_version_number} selected; {self.ctx.version_count} versions total.",
                 "used_artifacts": used,
+                "telemetry": {"provenance": "deterministic", "intent": self.intent},
             }
         return {
             "trace_steps": trace,
             "resolved_intent": self.intent,
         }
 
-    async def node_load_artifacts(self, state: CaseAgentState) -> Dict[str, Any]:
+    async def node_narrative(self, state: CaseAgentState) -> Dict[str, Any]:
+        """Load narrative-first context sections; compare/revision enrichment when needed."""
         if state.get("short_circuit"):
             return {}
         trace = [
             _step(
-                "load_artifacts",
-                "Loading case Context",
-                tool="load_case_context_artifacts",
-                detail="Claude-generated case context and version artifacts",
+                "narrative",
+                "Reading case summary",
+                detail="Using the stored summary for this version as the main story",
             )
         ]
         out: Dict[str, Any] = {"trace_steps": trace}
@@ -195,113 +199,158 @@ class CaseAgentGraphRunner:
             self._revision_extra = ""
         return out
 
-    async def node_retrieve(self, state: CaseAgentState) -> Dict[str, Any]:
+    async def node_assess_evidence(self, state: CaseAgentState) -> Dict[str, Any]:
         if state.get("short_circuit"):
             return {}
-        used_det = False
-        retrieve, reason = retrieval_policy(self.intent, self.question, used_det)
+        plan = build_evidence_search_plan(
+            self.intent, self.question, self.ctx, used_deterministic=False
+        )
+        self._evidence_search_plan = plan
+        retrieve = plan.retrieval_required
+        self._used_initial_retrieval = retrieve
         if retrieve:
             trace = [
                 _step(
-                    "retrieve",
-                    "Searching evidence chunks",
-                    tool="retrieve_chunks",
-                    detail=reason,
-                )
+                    "plan_search",
+                    "Planning document lookup",
+                    detail=f"{plan.question_type.replace('_', ' ')} · {plan.retrieval_goal.replace('_', ' ')}",
+                ),
+                _step("assess_sources", "Finding supporting pages", detail=plan.retrieval_reason),
             ]
-            try:
+        else:
+            trace = [
+                _step("assess_sources", "Answering from the case summary first", detail=plan.retrieval_reason)
+            ]
+        return {
+            "trace_steps": trace,
+            "need_retrieval": retrieve,
+        }
+
+    async def node_retrieve(self, state: CaseAgentState) -> Dict[str, Any]:
+        if state.get("short_circuit"):
+            return {}
+        trace = [_step("retrieve", "Searching uploaded documents", detail="Matching your question to excerpts")]
+        try:
+            plan = self._evidence_search_plan
+            if plan and plan.retrieval_required:
+                chunks = rag_retriever.retrieve_for_evidence_search(
+                    db=self.db,
+                    primary_query=self.question,
+                    case_id=self.case_id,
+                    user_id=self.user_id,
+                    case_version_id=self.ctx.selected_version_id,
+                    embedding_query=plan.embedding_query,
+                    top_k=24,
+                    use_adaptive=False,
+                    merge_lexical_matches=True,
+                    extra_lexical_terms=plan.lexical_terms,
+                )
+            else:
                 chunks = rag_retriever.retrieve_for_query(
                     db=self.db,
                     query=self.question,
                     case_id=self.case_id,
                     user_id=self.user_id,
-                    top_k=8,
+                    top_k=24,
                     use_adaptive=False,
                     case_version_id=self.ctx.selected_version_id,
+                    merge_lexical_matches=True,
                 )
-                rag_context = rag_retriever.build_context(chunks, max_tokens=4000) if chunks else None
-            except Exception as e:
-                logger.warning("Case agent RAG retrieve failed: %s", e)
-                rag_context = None
-            if rag_context:
-                self._rag_context = rag_context
-                return {
-                    "trace_steps": trace,
-                    "sources": _build_sources_from_rag(rag_context),
-                    "chunks_used": [c.chunk_id for c in rag_context.chunks],
-                }
-            self._rag_context = None
+            rag_context = rag_retriever.build_context(chunks, max_tokens=5500) if chunks else None
+        except Exception as e:
+            logger.warning("Case agent RAG retrieve failed: %s", e)
+            rag_context = None
+        if rag_context:
+            self._rag_context = rag_context
             return {
-                "trace_steps": [
-                    _step(
-                        "retrieve",
-                        "No chunks returned for this query",
-                        "done",
-                        tool="retrieve_chunks",
-                        detail=reason,
-                    )
-                ],
-                "sources": [],
-                "chunks_used": [],
+                "trace_steps": trace,
+                "sources": _build_sources_from_rag(rag_context),
+                "chunks_used": [c.chunk_id for c in rag_context.chunks],
             }
         self._rag_context = None
         return {
             "trace_steps": [
                 _step(
                     "retrieve",
-                    "Skipped embedding search (case Context first)",
-                    "skipped",
-                    tool="retrieve_chunks",
-                    detail=reason,
+                    "No matching document excerpts were found",
+                    "done",
+                    detail="You can ask about a specific page or section if needed",
                 )
             ],
             "sources": [],
             "chunks_used": [],
         }
 
+    def _compose_prompt_variables(self, formatted_context: str) -> Dict[str, Any]:
+        assert self.ctx is not None
+        plan = getattr(self, "_evidence_search_plan", None)
+        nf = self.ctx.build_narrative_first_context(
+            include_dashboard_context=self.include_dashboard_context,
+            revision_compare_extra=self._revision_extra or "",
+            search_plan_context=format_search_plan_for_prompt(plan),
+        )
+        wm = self.working_memory_text or "(No prior compressed memory for this version yet.)"
+        return {
+            "question": self.question,
+            "history_text": self.history_text or "No previous conversation",
+            "working_memory": wm,
+            **nf,
+            "formatted_context": formatted_context
+            or "No supporting document excerpts retrieved for this turn.",
+            "intent_hint": self.intent,
+        }
+
     async def node_compose(self, state: CaseAgentState) -> Dict[str, Any]:
         if state.get("short_circuit"):
             return {}
-        trace = [_step("compose", "Composing grounded answer", tool="answer_composer")]
-        sections = self.ctx.to_prompt_sections()
-        extra = getattr(self, "_revision_extra", "") or ""
-        if extra:
-            sections += extra
-        if not self.include_dashboard_context:
-            sections = (
-                "=== VERSION_METADATA (minimal; dashboard context omitted by request) ===\n"
-                f"Selected v{self.ctx.selected_version_number}; live v{self.ctx.live_version_number}; "
-                f"versions: {self.ctx.version_count}\n"
-            )
         rag_context = getattr(self, "_rag_context", None)
+        trace: List[Dict[str, Any]] = []
+        if rag_context:
+            trace.append(
+                _step(
+                    "evidence_compare",
+                    "Comparing retrieved evidence with the summary",
+                    detail="Ground document locations only in excerpts; keep clinical facts aligned with the summary",
+                )
+            )
+        trace.append(_step("compose", "Preparing answer"))
         formatted_context = rag_context.formatted_context if rag_context else ""
-        variables = {
-            "question": self.question,
-            "history_text": self.history_text or "No previous conversation",
-            "structured_case_context": sections,
-            "formatted_context": formatted_context or "No retrieved chunks for this turn.",
-            "intent_hint": self.intent,
-        }
+        variables = self._compose_prompt_variables(formatted_context)
+
         prompt_id = "case_agent_answer"
         fallback_template = """User question: {question}
 
 Prior conversation:
 {history_text}
 
-Case Context (primary source):
-{structured_case_context}
+Version-scoped working memory (compressed; not a separate source of truth):
+{working_memory}
 
-Retrieved evidence chunks (only for source/page grounding or when Case Context is insufficient):
+{search_plan_context}
+
+{authoritative_case_summary}
+
+{version_and_lineage}
+
+{review_artifacts}
+
+{structured_clinical_facts}
+
+{revision_compare_extra}
+
+Supporting document excerpts:
 {formatted_context}
 
-Classified intent hint: {intent_hint}
+Intent hint: {intent_hint}
 
-Answer using ONLY the case materials above.
-Start with Case Context first. Only rely on retrieved chunks when the user asks for evidence/page/source grounding or when Case Context is insufficient.
-If the answer is not present in Case Context and no retrieved chunks are provided, say "Not documented in the case Context."
-For version questions, prefer VERSION_METADATA and revision_impact_report over vague guesses.
-For compare/both-versions questions, structure the answer with clear per-version sections (e.g. v1 vs v2) when two versions appear in context.
-State whether key claims come from version metadata, case Context artifacts, or retrieved chunks.
+Instructions:
+- Understand the user question first, then use the stored case summary as the authoritative clinical story for this version.
+- Follow DOCUMENT_SEARCH_PLAN above; it mirrors the server's tool workflow for this turn.
+- For clinical facts, stay consistent with the summary. Do not contradict the summary.
+- For document names, file numbers, or page numbers: state them only if they appear in the supporting excerpts below.
+- When excerpts are provided, read them for the user's topic (including common medical synonyms). If an excerpt supports a location, cite it.
+- If the summary mentions a topic but no excerpt shows a clear location, say the summary supports the topic but a matching page/document was not found in the retrieved excerpts.
+- If the answer is not in the summary and excerpts do not help, say the information is not documented in the available materials for this version.
 """
         try:
             prompt = prompt_service.render_prompt(prompt_id, variables)
@@ -314,46 +363,92 @@ State whether key claims come from version metadata, case Context artifacts, or 
         if not system_message:
             system_message = (
                 "You are a clinical AI assistant for utilization management review. "
-                "Treat the provided Case Context as the primary source of truth. "
-                "Use retrieved chunks only for page/source grounding or when Case Context is insufficient. "
-                "Never fabricate clinical facts. Be concise and precise."
+                "Use only the provided materials. The stored case summary is authoritative for clinical facts. "
+                "Use document excerpts for page/file citations and for location questions; never invent a page or "
+                "document reference. When excerpts are provided, they are ground truth for what appears in source "
+                "documents. Never fabricate clinical facts."
             )
 
-        answer, confidence = await self.llm_answer_fn(
-            prompt,
-            prompt_id=prompt_id,
-            db=self.db,
-            user_id=self.user_id,
-            case_id=self.case_id,
-            system_message_override=system_message,
-        )
+        degraded = False
+        try:
+            answer, confidence = await self.llm_answer_fn(
+                prompt,
+                prompt_id=prompt_id,
+                db=self.db,
+                user_id=self.user_id,
+                case_id=self.case_id,
+                system_message_override=system_message,
+            )
+        except Exception as e:
+            logger.exception("Case agent LLM compose failed: %s", e)
+            degraded = True
+            has_summary = bool((self.ctx.narrative_markdown or "").strip())
+            if has_summary:
+                answer = (
+                    "I could not finish generating a full reply right now. "
+                    "The stored case summary is available for this version—please try again in a moment, "
+                    "or ask a shorter follow-up question."
+                )
+            else:
+                answer = (
+                    "I could not generate a reply right now. Please try again in a moment."
+                )
+            confidence = 0.0
+
         extra_trace: List[Dict[str, Any]] = []
-        if not rag_context and should_retry_with_retrieval(self.intent, self.question, answer):
+        provenance = "narrative_plus_evidence" if rag_context else "narrative_only"
+
+        if (
+            not degraded
+            and not rag_context
+            and should_retry_with_retrieval(
+                self.intent,
+                self.question,
+                answer,
+                ctx=self.ctx,
+                did_initial_retrieval=self._used_initial_retrieval,
+            )
+        ):
             extra_trace.append(
                 _step(
                     "retrieve_retry",
-                    "Case Context was insufficient; searching evidence chunks",
-                    tool="retrieve_chunks",
-                    detail="Fallback to embeddings only because the case Context did not answer the question",
+                    "Searching documents for more detail",
+                    detail="The summary did not fully answer this question",
                 )
             )
             try:
-                chunks = rag_retriever.retrieve_for_query(
-                    db=self.db,
-                    query=self.question,
-                    case_id=self.case_id,
-                    user_id=self.user_id,
-                    top_k=8,
-                    use_adaptive=False,
-                    case_version_id=self.ctx.selected_version_id,
-                )
-                rag_context = rag_retriever.build_context(chunks, max_tokens=4000) if chunks else None
+                plan = getattr(self, "_evidence_search_plan", None)
+                if plan and plan.retrieval_required:
+                    chunks = rag_retriever.retrieve_for_evidence_search(
+                        db=self.db,
+                        primary_query=self.question,
+                        case_id=self.case_id,
+                        user_id=self.user_id,
+                        case_version_id=self.ctx.selected_version_id,
+                        embedding_query=plan.embedding_query,
+                        top_k=24,
+                        use_adaptive=False,
+                        merge_lexical_matches=True,
+                        extra_lexical_terms=plan.lexical_terms,
+                    )
+                else:
+                    chunks = rag_retriever.retrieve_for_query(
+                        db=self.db,
+                        query=self.question,
+                        case_id=self.case_id,
+                        user_id=self.user_id,
+                        top_k=24,
+                        use_adaptive=False,
+                        case_version_id=self.ctx.selected_version_id,
+                        merge_lexical_matches=True,
+                    )
+                rag_context = rag_retriever.build_context(chunks, max_tokens=5500) if chunks else None
             except Exception as e:
                 logger.warning("Case agent fallback RAG retrieve failed: %s", e)
                 rag_context = None
             if rag_context:
                 self._rag_context = rag_context
-                variables["formatted_context"] = rag_context.formatted_context
+                variables = self._compose_prompt_variables(rag_context.formatted_context)
                 try:
                     prompt = prompt_service.render_prompt(prompt_id, variables)
                 except Exception:
@@ -368,6 +463,8 @@ State whether key claims come from version metadata, case Context artifacts, or 
                     case_id=self.case_id,
                     system_message_override=system_message,
                 )
+                provenance = "narrative_plus_evidence"
+
         blocks = dict(state.get("structured_blocks") or {})
         if self.intent == "contradictions" and self.ctx.contradictions_count:
             blocks["contradictions"] = {
@@ -375,6 +472,16 @@ State whether key claims come from version metadata, case Context artifacts, or 
                 "preview": self.ctx.contradictions[:5] if self.ctx.contradictions else [],
             }
         self.ctx.register_artifact("tier1_completion")
+
+        plan = getattr(self, "_evidence_search_plan", None)
+        telemetry = {
+            "intent": self.intent,
+            "provenance": provenance,
+            "initial_retrieval": self._used_initial_retrieval,
+            "degraded_compose": degraded,
+            "search_plan": plan.to_telemetry_dict() if plan else {},
+        }
+
         return {
             "trace_steps": trace + extra_trace,
             "answer": answer,
@@ -382,6 +489,7 @@ State whether key claims come from version metadata, case Context artifacts, or 
             "sources": _build_sources_from_rag(rag_context) if rag_context else state.get("sources"),
             "chunks_used": [c.chunk_id for c in rag_context.chunks] if rag_context else state.get("chunks_used"),
             "structured_blocks": blocks if blocks else state.get("structured_blocks"),
+            "telemetry": telemetry,
         }
 
     async def node_finalize(self, state: CaseAgentState) -> Dict[str, Any]:
@@ -393,11 +501,15 @@ State whether key claims come from version metadata, case Context artifacts, or 
         if state.get("chunks_used"):
             used.append("retrieved_evidence")
         used = list(dict.fromkeys(used))
+        base_tel = dict(state.get("telemetry") or {})
+        if "intent" not in base_tel and state.get("resolved_intent"):
+            base_tel["intent"] = state.get("resolved_intent")
         return {
             "suggested_actions": sug,
             "context_summary": state.get("context_summary")
-            or f"Intent={state.get('resolved_intent')}; v{getattr(self.ctx, 'selected_version_number', '?')}; graph complete.",
+            or f"Intent={state.get('resolved_intent')}; v{getattr(self.ctx, 'selected_version_number', '?')}; complete.",
             "used_artifacts": used,
+            "telemetry": base_tel,
         }
 
 
@@ -406,7 +518,13 @@ def _route_after_load(state: CaseAgentState) -> str:
 
 
 def _route_after_classify(state: CaseAgentState) -> str:
-    return "finalize" if state.get("short_circuit") else "artifacts"
+    return "finalize" if state.get("short_circuit") else "narrative"
+
+
+def _route_after_assess(state: CaseAgentState) -> str:
+    if state.get("short_circuit"):
+        return "compose"
+    return "retrieve" if state.get("need_retrieval") else "compose"
 
 
 def build_case_agent_graph(runner: CaseAgentGraphRunner) -> Any:
@@ -426,11 +544,14 @@ def build_case_agent_graph(runner: CaseAgentGraphRunner) -> Any:
         active_version_summary: Optional[Dict[str, Any]]
         context_summary: Optional[str]
         suggested_actions: List[str]
+        need_retrieval: bool
+        telemetry: Dict[str, Any]
 
     workflow = StateGraph(FullState)
     workflow.add_node("load", runner.node_load_context)
     workflow.add_node("classify", runner.node_classify)
-    workflow.add_node("artifacts", runner.node_load_artifacts)
+    workflow.add_node("narrative", runner.node_narrative)
+    workflow.add_node("assess", runner.node_assess_evidence)
     workflow.add_node("retrieve", runner.node_retrieve)
     workflow.add_node("compose", runner.node_compose)
     workflow.add_node("finalize", runner.node_finalize)
@@ -444,9 +565,14 @@ def build_case_agent_graph(runner: CaseAgentGraphRunner) -> Any:
     workflow.add_conditional_edges(
         "classify",
         _route_after_classify,
-        {"finalize": "finalize", "artifacts": "artifacts"},
+        {"finalize": "finalize", "narrative": "narrative"},
     )
-    workflow.add_edge("artifacts", "retrieve")
+    workflow.add_edge("narrative", "assess")
+    workflow.add_conditional_edges(
+        "assess",
+        _route_after_assess,
+        {"retrieve": "retrieve", "compose": "compose"},
+    )
     workflow.add_edge("retrieve", "compose")
     workflow.add_edge("compose", "finalize")
     workflow.add_edge("finalize", END)
@@ -468,6 +594,7 @@ def _state_to_result(state: CaseAgentState, runner: CaseAgentGraphRunner) -> Cas
         structured_blocks=state.get("structured_blocks"),
         resolved_intent=state.get("resolved_intent"),
         show_trace=bool(state.get("show_trace", True)),
+        telemetry=state.get("telemetry"),
     )
 
 
@@ -480,9 +607,18 @@ async def invoke_case_agent_graph(
     include_dashboard_context: bool,
     case_version_id: Optional[str],
     llm_answer_fn: LLMCaller,
+    working_memory_text: Optional[str] = None,
 ) -> CaseAgentRunResult:
     runner = CaseAgentGraphRunner(
-        db, case_id, user_id, question, history_text, include_dashboard_context, case_version_id, llm_answer_fn
+        db,
+        case_id,
+        user_id,
+        question,
+        history_text,
+        include_dashboard_context,
+        case_version_id,
+        llm_answer_fn,
+        working_memory_text=working_memory_text or "",
     )
     graph = build_case_agent_graph(runner)
     initial: CaseAgentState = {"trace_steps": []}
@@ -499,12 +635,21 @@ async def astream_case_agent_graph(
     include_dashboard_context: bool,
     case_version_id: Optional[str],
     llm_answer_fn: LLMCaller,
+    working_memory_text: Optional[str] = None,
 ) -> AsyncIterator[Dict[str, Any]]:
     """
     Stream NDJSON-friendly events. Yields trace_delta then a final payload.
     """
     runner = CaseAgentGraphRunner(
-        db, case_id, user_id, question, history_text, include_dashboard_context, case_version_id, llm_answer_fn
+        db,
+        case_id,
+        user_id,
+        question,
+        history_text,
+        include_dashboard_context,
+        case_version_id,
+        llm_answer_fn,
+        working_memory_text=working_memory_text or "",
     )
     graph = build_case_agent_graph(runner)
     initial: CaseAgentState = {"trace_steps": []}
@@ -533,4 +678,5 @@ async def astream_case_agent_graph(
         "structured_blocks": final.structured_blocks,
         "resolved_intent": final.resolved_intent,
         "show_trace": final.show_trace,
+        "telemetry": final.telemetry,
     }

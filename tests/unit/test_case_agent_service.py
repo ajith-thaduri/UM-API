@@ -3,7 +3,12 @@
 from app.services.case_agent_service import (
     classify_intent,
     context_aware_suggestions,
+    user_requests_document_evidence,
+    build_evidence_search_plan,
+    format_search_plan_for_prompt,
+    EvidenceSearchPlan,
     _try_deterministic_answer,
+    assess_should_retrieve_before_compose,
     retrieval_policy,
     should_retry_with_retrieval,
 )
@@ -34,6 +39,8 @@ def _minimal_ctx(**kwargs) -> CaseAgentContextBundle:
         contradictions_count=0,
         dashboard_extraction_bullets="MEDICATIONS: 0",
         lineage_text="",
+        narrative_markdown="",
+        patient_name="",
         used_artifact_keys=[],
     )
     defaults.update(kwargs)
@@ -89,16 +96,30 @@ def test_no_deterministic_for_general():
 
 
 def test_deterministic_greeting_is_clean_and_contextual():
-    ctx = _minimal_ctx(selected_version_number=4, version_count=3)
+    ctx = _minimal_ctx(
+        selected_version_number=4,
+        version_count=3,
+        patient_name="Jane Doe",
+    )
     ans, blocks = _try_deterministic_answer("Hello", ctx, "greeting")
     assert ans is not None
+    assert ans.startswith("Hello!")
+    assert "Jane Doe" in ans
     # Must not contain pipeline jargon
     assert "case Context" not in ans
     assert "source chunks" not in ans
     assert "embedding" not in ans
-    # Must mention version
+    # Must mention version (markdown bold **...** so UI renders cleanly)
     assert "v4" in ans
+    assert "**v4 of 3 versions**" in ans
     assert blocks is None
+
+
+def test_greeting_hey_uses_hello_and_patient():
+    ctx = _minimal_ctx(version_count=1, patient_name="Alex Smith")
+    ans, _ = _try_deterministic_answer("Hey", ctx, "greeting")
+    assert ans.startswith("Hello!")
+    assert "Alex Smith" in ans
 
 
 def test_greeting_suggestions_use_case_artifacts():
@@ -142,7 +163,49 @@ def test_identity_suggestions_are_contextual():
 def test_general_qa_prefers_case_context_before_retrieval():
     retrieve, reason = retrieval_policy("general_case_qa", "What medications is the patient on?", False)
     assert retrieve is False
-    assert "case Context" in reason
+    assert "summary" in reason.lower()
+
+
+def test_assess_narrative_first_general_qa():
+    ctx = _minimal_ctx(narrative_markdown="Patient has diabetes.")
+    r, reason = assess_should_retrieve_before_compose("general_case_qa", "What is the diagnosis?", ctx, False)
+    assert r is False
+    assert "summary" in reason.lower()
+
+
+def test_assess_retrieves_when_no_narrative():
+    ctx = _minimal_ctx(narrative_markdown="")
+    r, _ = assess_should_retrieve_before_compose("general_case_qa", "Any allergies?", ctx, False)
+    assert r is True
+
+
+def test_assess_evidence_lookup():
+    ctx = _minimal_ctx()
+    r, _ = assess_should_retrieve_before_compose("evidence_lookup", "What page mentions aspirin?", ctx, False)
+    assert r is True
+
+
+def test_user_requests_document_evidence_where_documented():
+    assert user_requests_document_evidence("Where is ECG data documented?")
+    assert user_requests_document_evidence("Which of the documents mentions troponin?")
+
+
+def test_assess_retrieves_when_question_asks_where_documented():
+    ctx = _minimal_ctx(narrative_markdown="Summary mentions ECG.")
+    r, reason = assess_should_retrieve_before_compose(
+        "general_case_qa", "Where is ECG documented in the uploads?", ctx, False
+    )
+    assert r is True
+    assert "document" in reason.lower()
+
+
+def test_classify_evidence_lookup_where_documented():
+    assert classify_intent("Where is ECG documented?") == "evidence_lookup"
+
+
+def test_retry_when_no_stored_narrative():
+    ctx = _minimal_ctx(narrative_markdown="")
+    assert should_retry_with_retrieval("general_case_qa", "Dose?", "Some answer.", ctx=ctx)
 
 
 def test_evidence_lookup_still_retrieves():
@@ -165,3 +228,55 @@ def test_no_retry_for_compare_when_case_context_is_primary():
         "What changed between v1 and v2?",
         "Not documented in the case Context.",
     )
+
+
+def test_retry_when_document_evidence_question_but_retrieval_skipped():
+    assert should_retry_with_retrieval(
+        "general_case_qa",
+        "Where is ECG documented?",
+        "Only in the case summary.",
+        did_initial_retrieval=False,
+    )
+
+
+def test_no_double_retry_when_document_evidence_already_retrieved():
+    assert not should_retry_with_retrieval(
+        "general_case_qa",
+        "Where is ECG documented?",
+        "See Document 2 page 3.",
+        did_initial_retrieval=True,
+    )
+
+
+def test_build_evidence_search_plan_summary_first_no_retrieval():
+    ctx = _minimal_ctx(narrative_markdown="Patient has hypertension.")
+    p = build_evidence_search_plan("general_case_qa", "What is the blood pressure issue?", ctx)
+    assert p.retrieval_required is False
+    assert p.question_type == "summary_answer"
+    assert p.retrieval_goal == "none"
+
+
+def test_build_evidence_search_plan_evidence_lookup():
+    ctx = _minimal_ctx(narrative_markdown="ECG showed sinus rhythm. Troponin negative.")
+    p = build_evidence_search_plan("evidence_lookup", "Which page mentions ECG?", ctx)
+    assert p.retrieval_required is True
+    assert p.question_type == "evidence_lookup"
+    assert p.retrieval_goal == "locate_document"
+    assert "ECG" in p.embedding_query or "ecg" in p.embedding_query.lower()
+
+
+def test_format_search_plan_requires_excerpts_for_pages():
+    p = EvidenceSearchPlan(
+        question_type="evidence_lookup",
+        answer_priority="summary_first",
+        retrieval_required=True,
+        retrieval_goal="locate_document",
+        retrieval_reason="test",
+        user_focus_terms=["temperature"],
+        summary_guided_terms=["febrile"],
+        embedding_query="q",
+        lexical_terms=["temperature", "febrile"],
+    )
+    text = format_search_plan_for_prompt(p)
+    assert "excerpt" in text.lower() or "page" in text.lower()
+    assert "summary" in text.lower()

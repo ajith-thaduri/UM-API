@@ -16,6 +16,11 @@ from app.repositories.extraction_repository import extraction_repository
 from app.repositories.dashboard_snapshot_repository import DashboardSnapshotRepository
 from app.repositories.facet_repository import FacetRepository
 from app.services.prompt_service import prompt_service
+from app.services.case_agent_working_memory import (
+    format_working_memory_for_prompt,
+    merge_working_memory,
+)
+from app.services.case_chat_etiquette import maybe_prepend_first_answer_version_etiquette
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +50,7 @@ class FollowUpResponse:
     structured_blocks: Optional[Dict[str, Any]] = None
     resolved_intent: Optional[str] = None
     show_trace: bool = True
+    telemetry: Optional[Dict[str, Any]] = None
 
 
 class MainAgent:
@@ -104,6 +110,8 @@ class MainAgent:
                 history_parts.append(f"{role}: {msg.content}")
             history_text = "\n".join(history_parts)
 
+        working_memory_prompt = format_working_memory_for_prompt(history)
+
         from app.services.case_agent_service import run_case_agent_turn
 
         async def _llm_case_agent(
@@ -132,16 +140,44 @@ class MainAgent:
             include_dashboard_context=include_dashboard_context,
             case_version_id=case_version_id,
             llm_answer_fn=_llm_case_agent,
+            working_memory_text=working_memory_prompt or None,
         )
 
-        agent_metadata = {
+        prev_wm: Optional[Dict[str, Any]] = None
+        for msg in reversed(history):
+            if msg.role == "assistant" and msg.agent_metadata:
+                prev_wm = msg.agent_metadata.get("working_memory")
+                if isinstance(prev_wm, dict):
+                    break
+                prev_wm = None
+
+        answer_out, version_intro_shown = maybe_prepend_first_answer_version_etiquette(
+            result.answer,
+            messages=history,
+            resolved_intent=result.resolved_intent,
+            active_version_summary=result.active_version_summary,
+        )
+
+        new_wm = merge_working_memory(
+            prev_wm if isinstance(prev_wm, dict) else None,
+            question=question,
+            answer=answer_out,
+            resolved_intent=result.resolved_intent,
+            sources=result.sources,
+        )
+
+        agent_metadata: Dict[str, Any] = {
             "trace_steps": result.trace_steps,
             "resolved_intent": result.resolved_intent,
             "used_artifacts": result.used_artifacts,
             "context_summary": result.context_summary,
             "active_version_summary": result.active_version_summary,
             "structured_blocks": result.structured_blocks,
+            "telemetry": result.telemetry,
+            "working_memory": new_wm,
         }
+        if version_intro_shown:
+            agent_metadata["case_version_intro_shown"] = True
 
         self._add_to_history(db, case_id, user_id, "user", question, case_version_id=case_version_id)
         self._add_to_history(
@@ -149,14 +185,14 @@ class MainAgent:
             case_id,
             user_id,
             "assistant",
-            result.answer,
+            answer_out,
             result.sources,
             case_version_id=case_version_id,
             agent_metadata=agent_metadata,
         )
 
         return FollowUpResponse(
-            answer=result.answer,
+            answer=answer_out,
             sources=result.sources,
             chunks_used=result.chunks_used,
             confidence=result.confidence,
@@ -168,6 +204,7 @@ class MainAgent:
             structured_blocks=result.structured_blocks,
             resolved_intent=result.resolved_intent,
             show_trace=result.show_trace,
+            telemetry=result.telemetry,
         )
 
     async def stream_follow_up_question(
@@ -194,6 +231,8 @@ class MainAgent:
                 history_parts.append(f"{role}: {msg.content}")
             history_text = "\n".join(history_parts)
 
+        working_memory_prompt = format_working_memory_for_prompt(history)
+
         async def _llm_case_agent(
             prompt: str,
             prompt_id: Optional[str] = None,
@@ -212,6 +251,7 @@ class MainAgent:
             )
 
         final_event: Optional[Dict[str, Any]] = None
+        version_intro_shown_stream = False
         async for event in astream_case_agent_graph(
             db=db,
             case_id=case_id,
@@ -221,13 +261,41 @@ class MainAgent:
             include_dashboard_context=include_dashboard_context,
             case_version_id=case_version_id,
             llm_answer_fn=_llm_case_agent,
+            working_memory_text=working_memory_prompt or None,
         ):
             if event.get("type") == "final":
-                final_event = event
-            yield event
+                ans, intro_on = maybe_prepend_first_answer_version_etiquette(
+                    event.get("answer") or "",
+                    messages=history,
+                    resolved_intent=event.get("resolved_intent"),
+                    active_version_summary=event.get("active_version_summary"),
+                )
+                version_intro_shown_stream = intro_on
+                final_event = {**event, "answer": ans}
+                yield final_event
+            else:
+                yield event
 
         if not final_event:
             return
+
+        prev_wm_stream: Optional[Dict[str, Any]] = None
+        for msg in reversed(history):
+            if msg.role == "assistant" and msg.agent_metadata:
+                cand = msg.agent_metadata.get("working_memory")
+                if isinstance(cand, dict):
+                    prev_wm_stream = cand
+                    break
+
+        answer_final = final_event.get("answer") or ""
+
+        new_wm_stream = merge_working_memory(
+            prev_wm_stream,
+            question=question,
+            answer=answer_final,
+            resolved_intent=final_event.get("resolved_intent"),
+            sources=final_event.get("sources") or [],
+        )
 
         agent_metadata = {
             "trace_steps": final_event.get("trace_steps") or [],
@@ -236,14 +304,18 @@ class MainAgent:
             "context_summary": final_event.get("context_summary"),
             "active_version_summary": final_event.get("active_version_summary"),
             "structured_blocks": final_event.get("structured_blocks"),
+            "telemetry": final_event.get("telemetry"),
+            "working_memory": new_wm_stream,
         }
+        if version_intro_shown_stream:
+            agent_metadata["case_version_intro_shown"] = True
         self._add_to_history(db, case_id, user_id, "user", question, case_version_id=case_version_id)
         self._add_to_history(
             db,
             case_id,
             user_id,
             "assistant",
-            final_event.get("answer") or "",
+            answer_final,
             final_event.get("sources") or [],
             case_version_id=case_version_id,
             agent_metadata=agent_metadata,
