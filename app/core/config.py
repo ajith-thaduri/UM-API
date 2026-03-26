@@ -187,11 +187,13 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days (10080 minutes)
 
-    # CORS
+    # CORS — list browser origins allowed to call this API (not the API URL itself).
+    # On Render you can override with env: CORS_ORIGINS=https://your-ui.onrender.com,http://localhost:3000
     CORS_ORIGINS: List[str] = [
         "http://localhost:3000",
         "http://localhost:3001",
         "https://brightcase-ui.onrender.com",
+        "https://um-ui-3r3j.onrender.com",
         "https://um.brightcone.ai",
         "https://www.um.brightcone.ai",
     ]
