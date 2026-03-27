@@ -2,6 +2,9 @@
 
 import json
 import logging
+import os
+import shutil
+import tempfile
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -27,6 +30,10 @@ from app.services.case_version_service import create_incremental_version, promot
 from app.services.case_vault_service import (
     build_case_vault_payload,
     validate_vault_selection_for_new_version,
+)
+from app.services.case_version_guardrail_service import (
+    evaluate_branch_new_uploads,
+    try_delete_uploaded_blob,
 )
 from app.services.pdf_service import pdf_service
 from app.services.storage_service import storage_service
@@ -162,6 +169,72 @@ async def get_case_vault(
     )
 
 
+@router.post("/{case_id}/versions/guardrails")
+async def branch_version_upload_guardrails(
+    case_id: str,
+    base_version_id: Optional[str] = Form(None),
+    files: Optional[List[UploadFile]] = File(None),
+    db: Session = Depends(get_db),
+    case_repo: CaseRepository = Depends(get_case_repository),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Advisory checks on new PDFs before creating a version (no DB writes).
+    Saves uploads to a temp directory, runs Tier-1 analysis + duplicate heuristics, then deletes temp files.
+    """
+    case = case_repo.get_by_id(db, case_id, user_id=current_user.id)
+    if not case:
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    if base_version_id:
+        base = case_version_repository.get_by_id_for_user(db, base_version_id, current_user.id)
+        if not base or base.case_id != case_id:
+            raise HTTPException(status_code=404, detail="Base version not found")
+        st = base.status.value if hasattr(base.status, "value") else str(base.status)
+        if st != CaseVersionStatus.READY.value:
+            raise HTTPException(status_code=400, detail="Base version must be READY")
+    else:
+        base = case_version_repository.get_live_for_case(db, case_id)
+        if not base:
+            raise HTTPException(
+                status_code=400,
+                detail="Case has no live version; specify base_version_id",
+            )
+
+    upload_list = files if files else []
+    for f in upload_list:
+        if not f.filename or not f.filename.lower().endswith(".pdf"):
+            raise HTTPException(status_code=400, detail="Only PDF files are supported")
+
+    if not upload_list:
+        raise HTTPException(status_code=400, detail="Provide at least one PDF to validate")
+
+    tmpdir = tempfile.mkdtemp(prefix="um_branch_guard_")
+    paths: List[tuple] = []
+    try:
+        for uf in upload_list:
+            safe_name = os.path.basename(uf.filename or "upload.pdf")
+            dest = os.path.join(tmpdir, f"{uuid.uuid4().hex}_{safe_name}")
+            content = await uf.read()
+            with open(dest, "wb") as out:
+                out.write(content)
+            paths.append((dest, uf.filename or safe_name))
+
+        result = await evaluate_branch_new_uploads(
+            db,
+            case=case,
+            base_version_id=base.id,
+            user_id=current_user.id,
+            uploads=paths,
+            exclude_existing_file_ids=None,
+        )
+        result["case_id"] = case_id
+        result["base_version_id"] = base.id
+        return result
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 @router.post("/{case_id}/versions/{version_id}/promote")
 async def promote_version(
     case_id: str,
@@ -181,6 +254,7 @@ async def create_case_version_with_files(
     case_id: str,
     base_version_id: Optional[str] = Form(None),
     selected_existing_file_ids: Optional[str] = Form(None),
+    guardrails_acknowledged: Optional[str] = Form(None),
     files: Optional[List[UploadFile]] = File(None),
     db: Session = Depends(get_db),
     case_repo: CaseRepository = Depends(get_case_repository),
@@ -240,6 +314,7 @@ async def create_case_version_with_files(
             raise HTTPException(status_code=400, detail="Only PDF files are supported")
 
     new_upload_ids: List[str] = []
+    new_case_files: List[CaseFile] = []
     total_pages_add = 0
     if upload_list:
         file_results = await storage_service.save_case_files(
@@ -262,6 +337,29 @@ async def create_case_version_with_files(
             )
             case_file_repo.create(db, cf)
             new_upload_ids.append(cf.id)
+            new_case_files.append(cf)
+
+    if new_case_files:
+        ack = (guardrails_acknowledged or "").strip().lower() in ("true", "1", "yes")
+        gr = await evaluate_branch_new_uploads(
+            db,
+            case=case,
+            base_version_id=base.id,
+            user_id=current_user.id,
+            uploads=[(cf.file_path, cf.file_name) for cf in new_case_files],
+            exclude_existing_file_ids=set(new_upload_ids),
+        )
+        if gr.get("has_warnings") and not ack:
+            for cf in new_case_files:
+                try_delete_uploaded_blob(cf.file_path)
+                case_file_repo.delete(db, cf.id)
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": "Upload guardrails reported warnings. Review findings or pass guardrails_acknowledged=true to proceed.",
+                    "guardrails": gr,
+                },
+            )
 
     new_snapshot_ids = list(dict.fromkeys(selected_ids + new_upload_ids))
     if not new_snapshot_ids:
