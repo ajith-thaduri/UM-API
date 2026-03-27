@@ -5,9 +5,12 @@ Tier-1 LLM only; Tier-2 narrative is read from DB via CaseAgentContextBundle.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 import operator
-from typing import Annotated, Any, AsyncIterator, Dict, List, Optional, TypedDict
+import time
+from typing import Annotated, Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, TypedDict
 
 from langgraph.graph import END, StateGraph
 from sqlalchemy.orm import Session
@@ -33,6 +36,10 @@ from app.services.prompt_service import prompt_service
 from app.services.rag_retriever import rag_retriever
 
 logger = logging.getLogger(__name__)
+
+# Chat latency guardrails: lower retrieval fan-out and prompt context budget for interactive turns.
+_CHAT_RETRIEVE_TOP_K = 12
+_CHAT_MAX_CONTEXT_TOKENS = 2600
 
 
 def _step(
@@ -79,6 +86,7 @@ class CaseAgentGraphRunner:
         case_version_id: Optional[str],
         llm_answer_fn: LLMCaller,
         working_memory_text: str = "",
+        on_answer_delta: Optional[Callable[[str], Awaitable[None] | None]] = None,
     ):
         self.db = db
         self.case_id = case_id
@@ -89,6 +97,7 @@ class CaseAgentGraphRunner:
         self.case_version_id = case_version_id
         self.llm_answer_fn = llm_answer_fn
         self.working_memory_text = (working_memory_text or "").strip()
+        self.on_answer_delta = on_answer_delta
         self.ctx: Any = None
         self.intent: str = "general_case_qa"
         self._revision_extra: str = ""
@@ -240,7 +249,7 @@ class CaseAgentGraphRunner:
                     user_id=self.user_id,
                     case_version_id=self.ctx.selected_version_id,
                     embedding_query=plan.embedding_query,
-                    top_k=24,
+                    top_k=_CHAT_RETRIEVE_TOP_K,
                     use_adaptive=False,
                     merge_lexical_matches=True,
                     extra_lexical_terms=plan.lexical_terms,
@@ -251,12 +260,16 @@ class CaseAgentGraphRunner:
                     query=self.question,
                     case_id=self.case_id,
                     user_id=self.user_id,
-                    top_k=24,
+                    top_k=_CHAT_RETRIEVE_TOP_K,
                     use_adaptive=False,
                     case_version_id=self.ctx.selected_version_id,
                     merge_lexical_matches=True,
                 )
-            rag_context = rag_retriever.build_context(chunks, max_tokens=5500) if chunks else None
+            rag_context = (
+                rag_retriever.build_context(chunks, max_tokens=_CHAT_MAX_CONTEXT_TOKENS)
+                if chunks
+                else None
+            )
         except Exception as e:
             logger.warning("Case agent RAG retrieve failed: %s", e)
             rag_context = None
@@ -378,6 +391,7 @@ Instructions:
                 user_id=self.user_id,
                 case_id=self.case_id,
                 system_message_override=system_message,
+                on_token=self.on_answer_delta,
             )
         except Exception as e:
             logger.exception("Case agent LLM compose failed: %s", e)
@@ -426,7 +440,7 @@ Instructions:
                         user_id=self.user_id,
                         case_version_id=self.ctx.selected_version_id,
                         embedding_query=plan.embedding_query,
-                        top_k=24,
+                        top_k=_CHAT_RETRIEVE_TOP_K,
                         use_adaptive=False,
                         merge_lexical_matches=True,
                         extra_lexical_terms=plan.lexical_terms,
@@ -437,12 +451,16 @@ Instructions:
                         query=self.question,
                         case_id=self.case_id,
                         user_id=self.user_id,
-                        top_k=24,
+                        top_k=_CHAT_RETRIEVE_TOP_K,
                         use_adaptive=False,
                         case_version_id=self.ctx.selected_version_id,
                         merge_lexical_matches=True,
                     )
-                rag_context = rag_retriever.build_context(chunks, max_tokens=5500) if chunks else None
+                rag_context = (
+                    rag_retriever.build_context(chunks, max_tokens=_CHAT_MAX_CONTEXT_TOKENS)
+                    if chunks
+                    else None
+                )
             except Exception as e:
                 logger.warning("Case agent fallback RAG retrieve failed: %s", e)
                 rag_context = None
@@ -462,6 +480,7 @@ Instructions:
                     user_id=self.user_id,
                     case_id=self.case_id,
                     system_message_override=system_message,
+                    on_token=self.on_answer_delta,
                 )
                 provenance = "narrative_plus_evidence"
 
@@ -640,6 +659,28 @@ async def astream_case_agent_graph(
     """
     Stream NDJSON-friendly events. Yields trace_delta then a final payload.
     """
+    queue: asyncio.Queue[Optional[Dict[str, Any]]] = asyncio.Queue()
+    answer_buffer = ""
+    last_flush_at = time.monotonic()
+
+    async def _flush_answer_buffer(force: bool = False) -> None:
+        nonlocal answer_buffer, last_flush_at
+        if not answer_buffer:
+            return
+        elapsed = time.monotonic() - last_flush_at
+        if not force and len(answer_buffer) < 48 and "\n" not in answer_buffer and elapsed < 0.06:
+            return
+        await queue.put({"type": "answer_delta", "delta": answer_buffer})
+        answer_buffer = ""
+        last_flush_at = time.monotonic()
+
+    async def _on_answer_delta(delta: str) -> None:
+        nonlocal answer_buffer
+        if not delta:
+            return
+        answer_buffer += delta
+        await _flush_answer_buffer()
+
     runner = CaseAgentGraphRunner(
         db,
         case_id,
@@ -650,33 +691,55 @@ async def astream_case_agent_graph(
         case_version_id,
         llm_answer_fn,
         working_memory_text=working_memory_text or "",
+        on_answer_delta=_on_answer_delta,
     )
     graph = build_case_agent_graph(runner)
     initial: CaseAgentState = {"trace_steps": []}
-    prev_len = 0
-    last_state: Dict[str, Any] = {}
 
-    async for state in graph.astream(initial, stream_mode="values"):
-        last_state = state
-        steps = state.get("trace_steps") or []
-        if len(steps) > prev_len:
-            yield {"type": "trace_delta", "steps": steps[prev_len:]}
-            prev_len = len(steps)
+    async def _produce() -> None:
+        prev_len = 0
+        last_state: Dict[str, Any] = {}
+        try:
+            async for state in graph.astream(initial, stream_mode="values"):
+                last_state = state
+                steps = state.get("trace_steps") or []
+                if len(steps) > prev_len:
+                    await _flush_answer_buffer(force=True)
+                    await queue.put({"type": "trace_delta", "steps": steps[prev_len:]})
+                    prev_len = len(steps)
 
-    final = _state_to_result(last_state, runner)
-    yield {
-        "type": "final",
-        "answer": final.answer,
-        "sources": final.sources,
-        "chunks_used": final.chunks_used,
-        "confidence": final.confidence,
-        "suggested_actions": final.suggested_actions,
-        "trace_steps": final.trace_steps,
-        "context_summary": final.context_summary,
-        "active_version_summary": final.active_version_summary,
-        "used_artifacts": final.used_artifacts,
-        "structured_blocks": final.structured_blocks,
-        "resolved_intent": final.resolved_intent,
-        "show_trace": final.show_trace,
-        "telemetry": final.telemetry,
-    }
+            await _flush_answer_buffer(force=True)
+            final = _state_to_result(last_state, runner)
+            await queue.put(
+                {
+                    "type": "final",
+                    "answer": final.answer,
+                    "sources": final.sources,
+                    "chunks_used": final.chunks_used,
+                    "confidence": final.confidence,
+                    "suggested_actions": final.suggested_actions,
+                    "trace_steps": final.trace_steps,
+                    "context_summary": final.context_summary,
+                    "active_version_summary": final.active_version_summary,
+                    "used_artifacts": final.used_artifacts,
+                    "structured_blocks": final.structured_blocks,
+                    "resolved_intent": final.resolved_intent,
+                    "show_trace": final.show_trace,
+                    "telemetry": final.telemetry,
+                }
+            )
+        finally:
+            await queue.put(None)
+
+    producer = asyncio.create_task(_produce())
+    try:
+        while True:
+            event = await queue.get()
+            if event is None:
+                break
+            yield event
+    finally:
+        if not producer.done():
+            producer.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await producer

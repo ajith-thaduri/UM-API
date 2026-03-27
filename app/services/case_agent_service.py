@@ -120,6 +120,14 @@ def build_evidence_search_plan(
     if user_requests_document_evidence(q):
         return make_plan("evidence_lookup", True, "Looking up pages in uploaded documents", "locate_document")
 
+    if intent == "general_case_qa" and user_requests_structured_review(q):
+        return make_plan(
+            "mixed",
+            True,
+            "Collecting supporting excerpts before drafting a structured review",
+            "support_fact",
+        )
+
     if intent in ("revision_diff", "compare_versions"):
         return make_plan("summary_answer", False, "Using version change summary first", "none")
 
@@ -504,6 +512,30 @@ def _try_deterministic_answer(
 def user_requests_document_evidence(question: str) -> bool:
     """User explicitly wants pages, documents, or source locations."""
     return bool(_DOCUMENT_EVIDENCE_QUERY_RE.search(question or ""))
+
+
+def user_requests_structured_review(question: str) -> bool:
+    """
+    Questions that usually need evidence-backed synthesis before streaming:
+    review / assess / summarize / table / plan style prompts often degrade if we
+    answer from summary first and then do a hidden retry with retrieval.
+    """
+    q = (question or "").lower()
+    hints = (
+        "review",
+        "assessment",
+        "assess",
+        "summarize",
+        "summary table",
+        "table",
+        "treatment plan",
+        "plan review",
+        "care plan",
+        "guideline",
+        "gaps",
+        "documentation issues",
+    )
+    return any(h in q for h in hints)
 
 
 def assess_should_retrieve_before_compose(

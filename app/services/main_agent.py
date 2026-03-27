@@ -1,8 +1,7 @@
 """Main agent orchestrator for context-aware follow-up questions"""
 
-import json
 import logging
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional
 from dataclasses import dataclass, field
 from datetime import datetime
 from sqlalchemy.orm import Session
@@ -121,6 +120,7 @@ class MainAgent:
             user_id: Optional[str] = None,
             case_id: Optional[str] = None,
             system_message_override: Optional[str] = None,
+            on_token: Optional[Callable[[str], Awaitable[None] | None]] = None,
         ) -> tuple[str, float]:
             return await self._get_llm_response(
                 prompt,
@@ -129,6 +129,7 @@ class MainAgent:
                 user_id=user_id,
                 case_id=case_id,
                 system_message_override=system_message_override,
+                on_token=on_token,
             )
 
         result = await run_case_agent_turn(
@@ -240,6 +241,7 @@ class MainAgent:
             user_id: Optional[str] = None,
             case_id: Optional[str] = None,
             system_message_override: Optional[str] = None,
+            on_token: Optional[Callable[[str], Awaitable[None] | None]] = None,
         ) -> tuple[str, float]:
             return await self._get_llm_response(
                 prompt,
@@ -248,6 +250,7 @@ class MainAgent:
                 user_id=user_id,
                 case_id=case_id,
                 system_message_override=system_message_override,
+                on_token=on_token,
             )
 
         final_event: Optional[Dict[str, Any]] = None
@@ -627,6 +630,7 @@ class MainAgent:
         user_id: Optional[str] = None,
         case_id: Optional[str] = None,
         system_message_override: Optional[str] = None,
+        on_token: Optional[Callable[[str], Awaitable[None] | None]] = None,
     ) -> tuple[str, float]:
         """Get response from LLM with usage tracking"""
         llm_service = self._get_llm_service(db, user_id)
@@ -658,17 +662,22 @@ class MainAgent:
                 max_tokens = settings.OPENAI_MAX_TOKENS
                 temperature = settings.OPENAI_TEMPERATURE
             
-            answer, usage = await llm_service.chat_completion(
-                messages=[
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ],
-                system_message=system_message,
-                temperature=temperature,
-                max_tokens=max_tokens
-            )
+            llm_messages = [{"role": "user", "content": prompt}]
+            if on_token:
+                answer, usage = await llm_service.chat_completion_stream(
+                    messages=llm_messages,
+                    system_message=system_message,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    on_token=on_token,
+                )
+            else:
+                answer, usage = await llm_service.chat_completion(
+                    messages=llm_messages,
+                    system_message=system_message,
+                    temperature=temperature,
+                    max_tokens=max_tokens
+                )
             
             # Track usage if user_id is available
             if user_id and db:
